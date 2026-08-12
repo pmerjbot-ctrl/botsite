@@ -1,0 +1,11 @@
+{
+  "name": "centro-gestao-discord-bot",
+  "version": "4.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1"
+  }
+}
