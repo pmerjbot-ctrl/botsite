@@ -1,0 +1,5 @@
+BOT PATCH V9.4.1
+1) Substitua index.js no GitHub do bot.
+2) No Railway, adicione DISCORD_POLICE_ROLE_ID com o ID do cargo "Polícia Militar".
+3) Faça novo deploy do bot.
+4) /auditoria passará a analisar somente membros com esse cargo.

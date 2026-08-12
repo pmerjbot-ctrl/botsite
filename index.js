@@ -3,7 +3,7 @@ import {
   ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder
 } from 'discord.js';
 
-const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID}=process.env;
+const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
 const VERSION='4.0.0-v9';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
@@ -35,14 +35,44 @@ async function processPosts(){try{const r=await api('/api/discord/posts');if(!r.
 async function heartbeat(){try{await api('/api/discord/heartbeat',{method:'POST',body:JSON.stringify({bot_user_id:client.user?.id,bot_tag:client.user?.tag,guild_id:DISCORD_GUILD_ID,version:VERSION,latency_ms:Math.round(client.ws.ping||0),started_at:startedAt,last_error:lastError||null,metadata:{railway:true}})});lastError=''}catch(e){lastError=String(e.message||e)}}
 async function registrationLink(discordId){const r=await api('/api/discord/registration-link',{method:'POST',body:JSON.stringify({discord_id:discordId})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Não foi possível gerar o link');return j.url}
 async function runAudit(interaction){
-  const guild=await client.guilds.fetch(DISCORD_GUILD_ID);await guild.members.fetch();const r=await api('/api/discord/audit-data');if(!r.ok)throw new Error('API de auditoria indisponível');const {members:site=[]}=await r.json();
-  const siteByDiscord=new Map(site.filter(x=>x.discord_id).map(x=>[String(x.discord_id),x]));const guildHumans=[...guild.members.cache.values()].filter(m=>!m.user.bot);const guildIds=new Set(guildHumans.map(m=>m.id));const registered=[];const unregistered=[];const mismatches=[];
-  for(const gm of guildHumans){const u=siteByDiscord.get(gm.id);if(u){registered.push(`${u.rank_name} ${u.game_name} - ${u.rg} | ${gm.user.tag}`);const expected=nickname(u.rank_name,u.game_name,u.rg);if(gm.nickname!==expected)mismatches.push(`${gm.user.tag} | atual: ${gm.nickname||gm.displayName} | esperado: ${expected}`)}else unregistered.push(`${gm.user.tag} | ${gm.id}`)}
-  const missing=site.filter(u=>u.discord_id&&!guildIds.has(String(u.discord_id))).map(u=>`${u.rank_name} ${u.game_name} - ${u.rg} | Discord ${u.discord_id}`);
-  const text=[`AUDITORIA DO EFETIVO - ${new Date().toLocaleString('pt-BR')}`,'',`SERVIDOR: ${guild.name}`,`MEMBROS HUMANOS: ${guildHumans.length}`,`CADASTRADOS NO SITE E PRESENTES: ${registered.length}`,`SEM CONTA NO SITE: ${unregistered.length}`,`CONTAS DO SITE FORA DO SERVIDOR: ${missing.length}`,`APELIDO DIVERGENTE: ${mismatches.length}`,'','=== CADASTRADOS ===',...registered,'','=== SEM CONTA NO SITE ===',...unregistered,'','=== CONTA NO SITE / NÃO LOCALIZADO NO SERVIDOR ===',...missing,'','=== APELIDOS DIVERGENTES ===',...mismatches].join('\n');
-  await api('/api/discord/audit-result',{method:'POST',body:JSON.stringify({requested_by_discord_id:interaction.user.id,guild_member_count:guildHumans.length,registered_count:registered.length,unregistered_count:unregistered.length,missing_from_guild_count:missing.length,nickname_mismatch_count:mismatches.length,summary:{guild_name:guild.name}})});
-  const embed=new EmbedBuilder().setTitle('Auditoria do Centro de Gestão').setDescription('Comparação concluída entre o servidor Discord e as contas aprovadas no site.').addFields({name:'Com conta',value:String(registered.length),inline:true},{name:'Sem conta',value:String(unregistered.length),inline:true},{name:'Fora do servidor',value:String(missing.length),inline:true},{name:'Nome divergente',value:String(mismatches.length),inline:true}).setTimestamp();
-  const file=new AttachmentBuilder(Buffer.from(text,'utf8'),{name:`auditoria-${Date.now()}.txt`});await interaction.editReply({embeds:[embed],files:[file]});
+  const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
+  await guild.members.fetch();
+  const r=await api('/api/discord/audit-data');
+  if(!r.ok)throw new Error('API de auditoria indisponível');
+  const {members:site=[]}=await r.json();
+
+  // A auditoria considera somente quem possui o cargo-base "Polícia Militar".
+  // O ID é a forma recomendada; o fallback pelo nome existe só para facilitar a primeira configuração.
+  let policeRole=null;
+  if(DISCORD_POLICE_ROLE_ID) policeRole=guild.roles.cache.get(String(DISCORD_POLICE_ROLE_ID))||null;
+  if(!policeRole){
+    policeRole=guild.roles.cache.find(role=>['polícia militar','policia militar'].includes(String(role.name||'').trim().toLocaleLowerCase('pt-BR')))||null;
+  }
+  if(!policeRole) throw new Error('Cargo Polícia Militar não encontrado. Configure DISCORD_POLICE_ROLE_ID no Railway.');
+
+  const siteByDiscord=new Map(site.filter(x=>x.discord_id).map(x=>[String(x.discord_id),x]));
+  const guildPolice=[...guild.members.cache.values()].filter(m=>!m.user.bot&&m.roles.cache.has(policeRole.id));
+  const policeIds=new Set(guildPolice.map(m=>m.id));
+  const registered=[];const unregistered=[];const mismatches=[];
+
+  for(const gm of guildPolice){
+    const u=siteByDiscord.get(gm.id);
+    if(u){
+      registered.push(`${u.rank_name} ${u.game_name} - ${u.rg} | ${gm.user.tag}`);
+      const expected=nickname(u.rank_name,u.game_name,u.rg);
+      if(gm.nickname!==expected)mismatches.push(`${gm.user.tag} | atual: ${gm.nickname||gm.displayName} | esperado: ${expected}`);
+    }else{
+      unregistered.push(`${gm.user.tag} | ${gm.id}`);
+    }
+  }
+
+  // Só apontamos como "fora do servidor/efetivo" contas aprovadas que não aparecem entre os membros PM auditados.
+  const missing=site.filter(u=>u.discord_id&&!policeIds.has(String(u.discord_id))).map(u=>`${u.rank_name} ${u.game_name} - ${u.rg} | Discord ${u.discord_id}`);
+  const text=[`AUDITORIA DO EFETIVO PM - ${new Date().toLocaleString('pt-BR')}`,'',`SERVIDOR: ${guild.name}`,`CARGO AUDITADO: ${policeRole.name}`,`MEMBROS COM POLÍCIA MILITAR: ${guildPolice.length}`,`CADASTRADOS NO SITE E PRESENTES: ${registered.length}`,`SEM CONTA NO SITE: ${unregistered.length}`,`CONTAS DO SITE FORA DO EFETIVO PM: ${missing.length}`,`APELIDO DIVERGENTE: ${mismatches.length}`,'','=== CADASTRADOS ===',...registered,'','=== PM SEM CONTA NO SITE ===',...unregistered,'','=== CONTA NO SITE / NÃO LOCALIZADO NO EFETIVO PM ===',...missing,'','=== APELIDOS DIVERGENTES ===',...mismatches].join('\n');
+  await api('/api/discord/audit-result',{method:'POST',body:JSON.stringify({requested_by_discord_id:interaction.user.id,guild_member_count:guildPolice.length,registered_count:registered.length,unregistered_count:unregistered.length,missing_from_guild_count:missing.length,nickname_mismatch_count:mismatches.length,summary:{guild_name:guild.name,police_role_id:policeRole.id,police_role_name:policeRole.name}})});
+  const embed=new EmbedBuilder().setTitle('Auditoria do Efetivo PM').setDescription(`Auditoria limitada aos membros com o cargo **${policeRole.name}**.`).addFields({name:'Efetivo auditado',value:String(guildPolice.length),inline:true},{name:'Com conta',value:String(registered.length),inline:true},{name:'Sem conta',value:String(unregistered.length),inline:true},{name:'Fora do efetivo',value:String(missing.length),inline:true},{name:'Nome divergente',value:String(mismatches.length),inline:true}).setTimestamp();
+  const file=new AttachmentBuilder(Buffer.from(text,'utf8'),{name:`auditoria-pm-${Date.now()}.txt`});
+  await interaction.editReply({embeds:[embed],files:[file]});
 }
 async function registerCommands(){
   const commands=[
