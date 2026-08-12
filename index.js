@@ -5,7 +5,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='4.0.0-v9';
+const VERSION='4.1.0-v9.5';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -26,12 +26,46 @@ async function processItem(item){
   else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
   if(item.kind==='ATTENDANCE_CHALLENGE'){
     const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Desafio de presença sem ID');
-    const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`presence:${challengeId}`).setLabel('Confirmar presença').setStyle(ButtonStyle.Success));
+    const isFinal=p.challenge_type==='FINAL';
+    const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`presence:${challengeId}`).setLabel(isFinal?'Encerrar ponto':'Confirmar presença').setStyle(ButtonStyle.Success));
     await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||'Confirme sua presença para manter o ponto válido.'}`,[row]);
   }else if(p.dm_message||item.kind==='DM_NOTIFY') await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
 }
 async function tick(){try{await api('/api/discord/attendance-due',{method:'POST',body:'{}'});const r=await api('/api/discord/queue');if(!r.ok)return;const {items=[]}=await r.json();for(const item of items){try{await processItem(item);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:true})})}catch(e){lastError=String(e.message||e);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('poll',lastError)}}
 async function processPosts(){try{const r=await api('/api/discord/posts');if(!r.ok)return;const {items=[],channels={}}=await r.json();for(const item of items){try{const channelId=channels[item.channel_key];if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');const p=item.payload||{};const embed=new EmbedBuilder().setTitle(String(p.title||'Centro de Gestão Interna').slice(0,256)).setDescription(String(p.description||'').slice(0,4000));if(Array.isArray(p.fields))embed.addFields(p.fields.slice(0,25).map(f=>({name:String(f.name||'Campo').slice(0,256),value:String(f.value||'—').slice(0,1024),inline:!!f.inline})));if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});embed.setTimestamp(new Date());const msg=await channel.send({embeds:[embed]});await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:true,discord_message_id:msg.id})})}catch(e){lastError=String(e.message||e);await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('posts',lastError)}}
+
+async function updateAttendancePanel(){
+  try{
+    const r=await api('/api/discord/attendance-panel');
+    if(!r.ok)return;
+    const d=await r.json();
+    if(!d.ok||!d.channel_id)return;
+    const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
+    const channel=await guild.channels.fetch(String(d.channel_id));
+    if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido ou não textual');
+    const active=Array.isArray(d.active)?d.active:[];
+    const lines=active.slice(0,25).map((x,i)=>{
+      const min=Math.floor(Number(x.credited_seconds||0)/60);
+      const mode=x.mode==='COMPAT'?'Leve':'Normal';
+      return `${i+1}. **${x.rank_name} ${x.game_name}**${x.division?` • ${x.division}`:''} — ${min} min • ${mode}`;
+    });
+    const embed=new EmbedBuilder()
+      .setTitle('Efetivo em serviço • Centro de Gestão')
+      .setDescription(lines.length?lines.join('\n'):'Nenhum membro está com ponto aberto no momento.')
+      .addFields(
+        {name:'Ativos na cidade',value:String(d.active_count||0),inline:true},
+        {name:'Efetivo cadastrado',value:String(d.effective||0),inline:true},
+        {name:'Meta diária',value:`${Math.round(Number(d.daily_seconds||3600)/60)} min`,inline:true}
+      )
+      .setFooter({text:'Painel atualizado automaticamente • ponto aberto no Centro de Gestão'})
+      .setTimestamp(new Date());
+    let msg=null;
+    if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}
+    if(!msg) msg=await channel.send({embeds:[embed]});
+    if(String(d.message_id||'')!==String(msg.id)) await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
+  }catch(e){lastError=String(e.message||e);console.error('attendance-panel',lastError)}
+}
+
 async function heartbeat(){try{await api('/api/discord/heartbeat',{method:'POST',body:JSON.stringify({bot_user_id:client.user?.id,bot_tag:client.user?.tag,guild_id:DISCORD_GUILD_ID,version:VERSION,latency_ms:Math.round(client.ws.ping||0),started_at:startedAt,last_error:lastError||null,metadata:{railway:true}})});lastError=''}catch(e){lastError=String(e.message||e)}}
 async function registrationLink(discordId){const r=await api('/api/discord/registration-link',{method:'POST',body:JSON.stringify({discord_id:discordId})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Não foi possível gerar o link');return j.url}
 async function runAudit(interaction){
@@ -94,5 +128,5 @@ client.on('interactionCreate',async i=>{
   if(i.commandName==='auditoria'){await i.deferReply({ephemeral:true});try{await runAudit(i)}catch(e){await i.editReply(`Falha na auditoria: ${e.message}`)}return}
   if(i.commandName==='sincronizar'){await i.deferReply({ephemeral:true});const target=i.options.getUser('membro',true);try{const r=await api('/api/discord/sync-request',{method:'POST',body:JSON.stringify({discord_id:target.id})});const j=await r.json();await i.editReply(r.ok&&j.ok?`Sincronização de **${j.member}** adicionada à fila.`:`Não foi possível sincronizar: ${j.error||'erro desconhecido'}`)}catch(e){await i.editReply(`Não foi possível sincronizar: ${e.message}`)}return}
 });
-client.once('ready',async()=>{console.log(`Bot online como ${client.user.tag}`);try{await registerCommands();console.log('Comandos registrados')}catch(e){lastError=String(e.message||e);console.error('commands',lastError)}setInterval(tick,POLL_MS);setInterval(processPosts,POLL_MS);setInterval(heartbeat,15000);tick();processPosts();heartbeat()});
+client.once('ready',async()=>{console.log(`Bot online como ${client.user.tag}`);try{await registerCommands();console.log('Comandos registrados')}catch(e){lastError=String(e.message||e);console.error('commands',lastError)}setInterval(tick,POLL_MS);setInterval(processPosts,POLL_MS);setInterval(heartbeat,15000);setInterval(updateAttendancePanel,20000);tick();processPosts();heartbeat();updateAttendancePanel()});
 client.login(DISCORD_BOT_TOKEN);

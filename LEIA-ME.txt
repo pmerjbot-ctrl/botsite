@@ -1,5 +1,15 @@
-BOT PATCH V9.4.1
-1) Substitua index.js no GitHub do bot.
-2) No Railway, adicione DISCORD_POLICE_ROLE_ID com o ID do cargo "Polícia Militar".
-3) Faça novo deploy do bot.
-4) /auditoria passará a analisar somente membros com esse cargo.
+PATCH DO BOT V9.5
+
+Substitua o index.js do repositório do bot por este arquivo e faça um novo deploy no Railway.
+Não é necessário mudar os segredos existentes.
+
+O painel de ponto ao vivo usa o canal configurado no próprio site:
+Admin > Discord > Canais de publicação > ID canal do painel de ponto ao vivo.
+
+O bot passa a:
+- editar uma mensagem fixa com Ativos na cidade e Efetivo cadastrado;
+- atualizar o painel aproximadamente a cada 20 segundos;
+- enviar a confirmação final do ponto por DM;
+- fechar a confirmação pelo botão do Discord.
+
+Mantenha DISCORD_POLICE_ROLE_ID configurado para a auditoria continuar limitada ao cargo Polícia Militar.
