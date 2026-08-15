@@ -3,9 +3,9 @@ import {
   ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder
 } from 'discord.js';
 
-const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
+const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID,DISCORD_DISMISSED_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='6.1.0-v12';
+const VERSION='6.1.1-v12.1.4';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -44,7 +44,18 @@ async function processItem(item){
   else if(item.kind==='FULL_SYNC'){const desired=new Set((p.desired_role_ids||[]).map(String));for(const r of (p.managed_role_ids||[])){const id=String(r);try{await applyRole(member,id,desired.has(id)?'add':'remove')}catch(e){console.warn('Cargo',id,e.message)}}await syncNickname(member,p)}
   else if(['MEDAL_ADD','COURSE_ADD','SPECIAL_ROLE_ADD'].includes(item.kind)){await applyRole(member,p.discord_role_id,'add')}
   else if(['MEDAL_REMOVE','COURSE_REMOVE','SPECIAL_ROLE_REMOVE'].includes(item.kind)){await applyRole(member,p.discord_role_id,'remove')}
-  else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
+  else if(item.kind==='MEMBER_DISMISSED'){
+    // Desligamento: remove todos os cargos editáveis do membro e aplica o cargo de desligado, se configurado.
+    const removable=[...member.roles.cache.values()].filter(r=>r.id!==guild.id&&!r.managed&&r.editable);
+    for(const role of removable){try{await member.roles.remove(role.id,'Desligamento pelo Centro de Gestão')}catch(e){console.warn('Falha ao remover cargo',role.id,e.message)}}
+    let dismissedRoleId=String(DISCORD_DISMISSED_ROLE_ID||'');
+    try{const cr=await api('/api/discord/config');if(cr.ok){const cj=await cr.json();dismissedRoleId=String(cj.dismissed_role_id||dismissedRoleId)}}catch{}
+    if(dismissedRoleId){
+      const dismissedRole=guild.roles.cache.get(dismissedRoleId)||await guild.roles.fetch(dismissedRoleId).catch(()=>null);
+      if(dismissedRole&&dismissedRole.editable){try{await member.roles.add(dismissedRole.id,'Cargo de desligado pelo Centro de Gestão')}catch(e){console.warn('Falha ao aplicar cargo de desligado',e.message)}}
+      else console.warn('Cargo de desligado não encontrado ou não editável pelo bot.');
+    }
+  }
   else if(item.kind==='PASSWORD_RESET_APPROVED'){const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`).setLabel('Confirmar nova senha').setStyle(ButtonStyle.Primary));const delivered=await safeDm(member,p.dm_message||'Sua recuperação de senha foi aprovada. Confirme abaixo.',[row]);if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');}
   if(item.kind==='ATTENDANCE_CHALLENGE'){
     const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Desafio de presença sem ID');
@@ -99,7 +110,7 @@ async function upsertCenterPanel(forceChannel=null){
 }
 async function upsertPublicPanel(forceChannel=null){
  const r=await api('/api/discord/public-panel');if(!r.ok)throw new Error('API do Portal indisponível');const d=await r.json();const channelId=String(forceChannel||d.public_channel_id||'');if(!channelId)return null;const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);if(!channel?.isTextBased())throw new Error('Canal do Portal inválido');
- const portalEmbed=new EmbedBuilder().setColor(0x0B4F8A).setTitle('🏛️ PMERJ WEBSITE').setDescription('O nosso **website** é a plataforma de gestão e atendimento da Polícia Militar do Estado do Rio de Janeiro - Reduto Online, focada em duas funções públicas principais:\n\n• 🛡️ **Denúncias Anônimas**\n• 📋 **Recrutamento Oficial:** inscrições e informações sobre novos concursos e ingresso na corporação.\n\n**Polícia Militar do Estado do Rio de Janeiro - Reduto Online**').setFooter({text:'Sem vínculo institucional ou governamental com a PMERJ real.'});if(d.public_top_image_url)portalEmbed.setThumbnail(d.public_top_image_url);if(d.public_bottom_image_url)portalEmbed.setImage(d.public_bottom_image_url);const embeds=[portalEmbed];
+ const portalEmbed=new EmbedBuilder().setColor(0x0B4F8A).setTitle('🏛️ PMERJ WEBSITE').setDescription('O nosso **website** é a plataforma de gestão e atendimento da Polícia Militar do Estado do Rio de Janeiro - Reduto Online, focada em duas funções públicas principais:\n\n• 🛡️ **Denúncias Anônimas**\n• 📋 **Recrutamento Oficial:** inscrições e informações sobre novos concursos e ingresso na corporação.\n\n**Polícia Militar do Estado do Rio de Janeiro - Reduto Online**').setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'});if(d.public_top_image_url)portalEmbed.setThumbnail(d.public_top_image_url);if(d.public_bottom_image_url)portalEmbed.setImage(d.public_bottom_image_url);const embeds=[portalEmbed];
  const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(SITE_URL).setLabel('Acessar o Portal'));
  let msg=null;if(d.public_message_id&&!forceChannel){try{msg=await channel.messages.fetch(String(d.public_message_id));await msg.edit({embeds,components:[row]})}catch{}}if(!msg)msg=await channel.send({embeds,components:[row]});await api('/api/discord/public-panel',{method:'POST',body:JSON.stringify({channel_id:channelId,message_id:msg.id})});return msg;
 }

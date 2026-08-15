@@ -1,0 +1,5 @@
+BOT V12.1.4
+- Portal público com rodapé apenas: Polícia Militar do Estado do Rio de Janeiro - Reduto Online.
+- Desligamento/PAD 3 remove todos os cargos editáveis pelo bot.
+- Depois aplica o cargo SPECIAL/DISMISSED configurado no site.
+- Fallback opcional: DISCORD_DISMISSED_ROLE_ID no Railway.
