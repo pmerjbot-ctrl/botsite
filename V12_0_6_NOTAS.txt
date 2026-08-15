@@ -1,0 +1,1 @@
+Bot V12.0.6: confirmação de recuperação de senha via DM + botão seguro, além das funções V12 existentes.
