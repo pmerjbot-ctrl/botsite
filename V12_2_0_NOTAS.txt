@@ -1,0 +1,4 @@
+V12.2.0
+- Relatórios de ações e apreensões agora exibem fotos diretamente nos embeds.
+- Até 3 imagens por relatório: a primeira no embed principal e as demais em embeds de imagem.
+- Não exige variável nova no Railway.

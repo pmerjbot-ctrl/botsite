@@ -1,6 +1,6 @@
 {
   "name": "centro-gestao-pmerj-bot-v12",
-  "version": "12.1.0",
+  "version": "12.2.0",
   "type": "module",
   "scripts": {
     "start": "node index.js"

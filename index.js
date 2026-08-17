@@ -5,7 +5,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID,DISCORD_DISMISSED_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='6.1.1-v12.1.4';
+const VERSION='6.2.0-v12.2.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -65,7 +65,32 @@ async function processItem(item){
   }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||item.kind==='DM_NOTIFY')) await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
 }
 async function tick(){try{await api('/api/discord/attendance-due',{method:'POST',body:'{}'});const r=await api('/api/discord/queue');if(!r.ok)return;const {items=[]}=await r.json();for(const item of items){try{await processItem(item);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:true})})}catch(e){lastError=String(e.message||e);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('poll',lastError)}}
-async function processPosts(){try{const r=await api('/api/discord/posts');if(!r.ok)return;const {items=[],channels={}}=await r.json();for(const item of items){try{const channelId=channels[item.channel_key];if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');const p=item.payload||{};const embed=new EmbedBuilder().setTitle(String(p.title||'Centro de Gestão Interna').slice(0,256)).setDescription(String(p.description||'').slice(0,4000));const colors={ACTION:0x1595D3,SEIZURE:0x08A8C7,PUNISHMENT:0xC43D4B,DISMISSAL:0x8B2635,PROMOTION:0x19B56B,DEMOTION:0xD97706};embed.setColor(colors[item.source_type]||0x1595D3);const guildIcon=guild.iconURL?.()||undefined;embed.setAuthor({name:'PMERJ • Centro de Gestão Interna',...(guildIcon?{iconURL:guildIcon}:{})});if(Array.isArray(p.fields))embed.addFields(p.fields.slice(0,25).map(f=>({name:String(f.name||'Campo').slice(0,256),value:String(f.value||'—').slice(0,1024),inline:!!f.inline})));if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});embed.setTimestamp(new Date());const msg=await channel.send({embeds:[embed]});await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:true,discord_message_id:msg.id})})}catch(e){lastError=String(e.message||e);await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('posts',lastError)}}
+async function processPosts(){
+  try{
+    const r=await api('/api/discord/posts');if(!r.ok)return;
+    const {items=[],channels={}}=await r.json();
+    for(const item of items){
+      try{
+        const channelId=channels[item.channel_key];if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);
+        const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);
+        if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');
+        const p=item.payload||{};
+        const colors={ACTION:0x0B4F8A,SEIZURE:0x123F72,PUNISHMENT:0xC43D4B,DISMISSAL:0x8B2635,PROMOTION:0x19B56B,DEMOTION:0xD97706};
+        const color=colors[item.source_type]||0x0B4F8A;
+        const embed=new EmbedBuilder().setTitle(String(p.title||'Centro de Gestão Interna').slice(0,256)).setDescription(String(p.description||'').slice(0,4000)).setColor(color);
+        const guildIcon=guild.iconURL?.()||undefined;embed.setAuthor({name:'PMERJ • Centro de Gestão Interna',...(guildIcon?{iconURL:guildIcon}:{})});
+        if(Array.isArray(p.fields))embed.addFields(p.fields.slice(0,25).map(f=>({name:String(f.name||'Campo').slice(0,256),value:String(f.value||'—').slice(0,1024),inline:!!f.inline})));
+        if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});embed.setTimestamp(new Date());
+        const images=Array.isArray(p.images)?p.images.map(String).filter(x=>/^https:\/\//i.test(x)).slice(0,3):[];
+        if(images[0])embed.setImage(images[0]);
+        const embeds=[embed];
+        for(const url of images.slice(1))embeds.push(new EmbedBuilder().setColor(color).setImage(url));
+        const msg=await channel.send({embeds});
+        await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:true,discord_message_id:msg.id})});
+      }catch(e){lastError=String(e.message||e);await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}
+    }
+  }catch(e){lastError=String(e.message||e);console.error('posts',lastError)}
+}
 
 async function updateAttendancePanel(){
   try{
