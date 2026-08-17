@@ -3,9 +3,9 @@ import {
   ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder
 } from 'discord.js';
 
-const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID,DISCORD_DISMISSED_ROLE_ID}=process.env;
+const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='6.2.0-v12.2.0';
+const VERSION='6.3.0-v12.3';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -42,20 +42,38 @@ async function processItem(item){
   if(item.kind==='RANK_CHANGE'||item.kind==='DIVISION_CHANGE'){await applyRole(member,p.from_role_id,'remove');await applyRole(member,p.discord_role_id,'add');await syncNickname(member,p)}
   else if(item.kind==='ACCESS_APPROVED'){await applyRole(member,p.rank_role_id,'add');await applyRole(member,p.division_role_id,'add');await syncNickname(member,p)}
   else if(item.kind==='FULL_SYNC'){const desired=new Set((p.desired_role_ids||[]).map(String));for(const r of (p.managed_role_ids||[])){const id=String(r);try{await applyRole(member,id,desired.has(id)?'add':'remove')}catch(e){console.warn('Cargo',id,e.message)}}await syncNickname(member,p)}
-  else if(['MEDAL_ADD','COURSE_ADD','SPECIAL_ROLE_ADD'].includes(item.kind)){await applyRole(member,p.discord_role_id,'add')}
-  else if(['MEDAL_REMOVE','COURSE_REMOVE','SPECIAL_ROLE_REMOVE'].includes(item.kind)){await applyRole(member,p.discord_role_id,'remove')}
-  else if(item.kind==='MEMBER_DISMISSED'){
-    // Desligamento: remove todos os cargos editáveis do membro e aplica o cargo de desligado, se configurado.
-    const removable=[...member.roles.cache.values()].filter(r=>r.id!==guild.id&&!r.managed&&r.editable);
-    for(const role of removable){try{await member.roles.remove(role.id,'Desligamento pelo Centro de Gestão')}catch(e){console.warn('Falha ao remover cargo',role.id,e.message)}}
-    let dismissedRoleId=String(DISCORD_DISMISSED_ROLE_ID||'');
-    try{const cr=await api('/api/discord/config');if(cr.ok){const cj=await cr.json();dismissedRoleId=String(cj.dismissed_role_id||dismissedRoleId)}}catch{}
-    if(dismissedRoleId){
-      const dismissedRole=guild.roles.cache.get(dismissedRoleId)||await guild.roles.fetch(dismissedRoleId).catch(()=>null);
-      if(dismissedRole&&dismissedRole.editable){try{await member.roles.add(dismissedRole.id,'Cargo de desligado pelo Centro de Gestão')}catch(e){console.warn('Falha ao aplicar cargo de desligado',e.message)}}
-      else console.warn('Cargo de desligado não encontrado ou não editável pelo bot.');
+  else if(item.kind==='LOGIN_ROLE_CHECK'){
+    const rankRoles=Array.isArray(p.rank_roles)?p.rank_roles:[];
+    const present=rankRoles.filter(r=>member.roles.cache.has(String(r.role_id)));
+    const siteRank=String(p.site_rank||'');
+    const siteRole=String(p.site_rank_role_id||rankRoles.find(r=>String(r.rank)===siteRank)?.role_id||'');
+    if(present.length>1){
+      for(const r of rankRoles){const id=String(r.role_id);try{await applyRole(member,id,id===siteRole?'add':'remove')}catch(e){console.warn('proteção patente',id,e.message)}}
+      await syncNickname(member,{...p,rank_name:siteRank});
+    }else if(present.length===1){
+      const detected=String(present[0].rank||'');
+      const detectedRole=String(present[0].role_id||'');
+      if(['Recruta','Soldado'].includes(detected)&&detected!==siteRank){
+        const rr=await api('/api/discord/login-rank-result',{method:'POST',body:JSON.stringify({user_id:item.user_id,detected_rank:detected})});
+        if(!rr.ok)throw new Error('Site recusou ajuste automático de patente.');
+        for(const r of rankRoles){const id=String(r.role_id);try{await applyRole(member,id,id===detectedRole?'add':'remove')}catch{}}
+        await syncNickname(member,{...p,rank_name:detected});
+      }else if(detected!==siteRank){
+        try{await applyRole(member,detectedRole,'remove')}catch{}
+        if(siteRole)await applyRole(member,siteRole,'add');
+        await syncNickname(member,{...p,rank_name:siteRank});
+      }else{
+        for(const r of rankRoles){const id=String(r.role_id);if(id!==siteRole){try{await applyRole(member,id,'remove')}catch{}}}
+        await syncNickname(member,{...p,rank_name:siteRank});
+      }
+    }else{
+      if(siteRole)await applyRole(member,siteRole,'add');
+      await syncNickname(member,{...p,rank_name:siteRank});
     }
   }
+  else if(['MEDAL_ADD','COURSE_ADD','SPECIAL_ROLE_ADD'].includes(item.kind)){await applyRole(member,p.discord_role_id,'add')}
+  else if(['MEDAL_REMOVE','COURSE_REMOVE','SPECIAL_ROLE_REMOVE'].includes(item.kind)){await applyRole(member,p.discord_role_id,'remove')}
+  else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
   else if(item.kind==='PASSWORD_RESET_APPROVED'){const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`).setLabel('Confirmar nova senha').setStyle(ButtonStyle.Primary));const delivered=await safeDm(member,p.dm_message||'Sua recuperação de senha foi aprovada. Confirme abaixo.',[row]);if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');}
   if(item.kind==='ATTENDANCE_CHALLENGE'){
     const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Desafio de presença sem ID');
@@ -71,56 +89,78 @@ async function processPosts(){
     const {items=[],channels={}}=await r.json();
     for(const item of items){
       try{
-        const channelId=channels[item.channel_key];if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);
-        const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);
+        const channelId=channels[item.channel_key];
+        if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);
+        const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
+        const channel=await guild.channels.fetch(channelId);
         if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');
         const p=item.payload||{};
-        const colors={ACTION:0x0B4F8A,SEIZURE:0x123F72,PUNISHMENT:0xC43D4B,DISMISSAL:0x8B2635,PROMOTION:0x19B56B,DEMOTION:0xD97706};
-        const color=colors[item.source_type]||0x0B4F8A;
-        const embed=new EmbedBuilder().setTitle(String(p.title||'Centro de Gestão Interna').slice(0,256)).setDescription(String(p.description||'').slice(0,4000)).setColor(color);
-        const guildIcon=guild.iconURL?.()||undefined;embed.setAuthor({name:'PMERJ • Centro de Gestão Interna',...(guildIcon?{iconURL:guildIcon}:{})});
-        if(Array.isArray(p.fields))embed.addFields(p.fields.slice(0,25).map(f=>({name:String(f.name||'Campo').slice(0,256),value:String(f.value||'—').slice(0,1024),inline:!!f.inline})));
-        if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});embed.setTimestamp(new Date());
-        const images=Array.isArray(p.images)?p.images.map(String).filter(x=>/^https:\/\//i.test(x)).slice(0,3):[];
-        if(images[0])embed.setImage(images[0]);
+        const colors={ACTION:0x1B6FA8,SEIZURE:0x0E8E9D,PUNISHMENT:0xB5394C,DISMISSAL:0x7C2636,PROMOTION:0x198D62,DEMOTION:0xB96B16,COMPLAINT:0x8E5AB5,PUBLIC_COMPLAINT:0x8E5AB5};
+        const icon=item.source_type==='ACTION'?'🚔':item.source_type==='SEIZURE'?'📦':item.source_type==='PUNISHMENT'?'⚠️':item.source_type==='PROMOTION'?'⬆️':item.source_type==='DEMOTION'?'⬇️':'🛡️';
+        const embed=new EmbedBuilder()
+          .setColor(colors[item.source_type]||0x1B6FA8)
+          .setAuthor({name:`${icon} PMERJ • Centro de Gestão`,...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
+          .setTitle(String(p.title||'Relatório PMERJ').slice(0,256))
+          .setDescription(String(p.description||'Sem descrição.').slice(0,4000));
+
+        if(Array.isArray(p.fields)){
+          const pretty=p.fields.slice(0,25).map(f=>({
+            name:String(f.name||'Informação').slice(0,256),
+            value:String(f.value||'—').slice(0,1024),
+            inline:!!f.inline
+          }));
+          embed.addFields(pretty);
+        }
+        if(p.xp_reward)embed.addFields({name:'✦ EXP da atividade',value:`+${p.xp_reward} EXP por participante`,inline:true});
+        if(p.occurred_at)embed.addFields({name:'🕒 Data do registro',value:`<t:${Math.floor(new Date(p.occurred_at).getTime()/1000)}:f>`,inline:true});
+        if(p.author_avatar&&/^https?:\/\//i.test(String(p.author_avatar)))embed.setThumbnail(String(p.author_avatar));
+        if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});
+        embed.setTimestamp(new Date());
+
+        const images=Array.isArray(p.images)?p.images.filter(x=>/^https?:\/\//i.test(String(x))).slice(0,3):[];
+        if(images[0])embed.setImage(String(images[0]));
         const embeds=[embed];
-        for(const url of images.slice(1))embeds.push(new EmbedBuilder().setColor(color).setImage(url));
+        for(const url of images.slice(1))embeds.push(new EmbedBuilder().setColor(colors[item.source_type]||0x1B6FA8).setImage(String(url)));
         const msg=await channel.send({embeds});
         await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:true,discord_message_id:msg.id})});
-      }catch(e){lastError=String(e.message||e);await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}
+      }catch(e){
+        lastError=String(e.message||e);
+        await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})});
+      }
     }
   }catch(e){lastError=String(e.message||e);console.error('posts',lastError)}
 }
 
 async function updateAttendancePanel(){
   try{
-    const r=await api('/api/discord/attendance-panel');
-    if(!r.ok)return;
-    const d=await r.json();
-    if(!d.ok||!d.channel_id)return;
+    const r=await api('/api/discord/attendance-panel');if(!r.ok)return;
+    const d=await r.json();if(!d.ok||!d.channel_id)return;
     const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
     const channel=await guild.channels.fetch(String(d.channel_id));
     if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido ou não textual');
     const active=Array.isArray(d.active)?d.active:[];
-    const lines=active.slice(0,25).map((x,i)=>{
+    const lines=active.slice(0,20).map((x,i)=>{
       const min=Math.floor(Number(x.credited_seconds||0)/60);
-      const mode=x.mode==='COMPAT'?'Leve':'Normal';
-      return `${i+1}. **${x.rank_name} ${x.game_name}**${x.division?` • ${x.division}`:''} — ${min} min • ${mode}`;
+      const mode=x.mode==='COMPAT'?'☁️ Leve':'🌐 Normal';
+      const bar='▰'.repeat(Math.min(5,Math.floor(min/12)))+'▱'.repeat(Math.max(0,5-Math.min(5,Math.floor(min/12))));
+      return `**${String(i+1).padStart(2,'0')}. ${x.rank_name} ${x.game_name}**\n${bar}  ${min} min • ${mode}${x.division?` • ${x.division}`:''}`;
     });
     const embed=new EmbedBuilder()
-      .setTitle('Efetivo em serviço • Centro de Gestão')
-      .setDescription(lines.length?lines.join('\n'):'Nenhum membro está com ponto aberto no momento.')
+      .setColor(0x155F8D)
+      .setAuthor({name:'PMERJ • Centro de Gestão',...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
+      .setTitle('🟢 EFETIVO EM SERVIÇO')
+      .setDescription(lines.length?lines.join('\n\n'):'> Nenhum membro está com ponto aberto no momento.')
       .addFields(
-        {name:'Ativos na cidade',value:String(d.active_count||0),inline:true},
-        {name:'Efetivo cadastrado',value:String(d.effective||0),inline:true},
-        {name:'Meta diária',value:`${Math.round(Number(d.daily_seconds||3600)/60)} min`,inline:true}
+        {name:'👮 Em serviço',value:`**${d.active_count||0}**`,inline:true},
+        {name:'🏛️ Efetivo',value:`**${d.effective||0}**`,inline:true},
+        {name:'⏱️ Meta',value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,inline:true}
       )
-      .setFooter({text:'Painel atualizado automaticamente • ponto aberto no Centro de Gestão'})
+      .setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'})
       .setTimestamp(new Date());
     let msg=null;
     if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}
-    if(!msg) msg=await channel.send({embeds:[embed]});
-    if(String(d.message_id||'')!==String(msg.id)) await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
+    if(!msg)msg=await channel.send({embeds:[embed]});
+    if(String(d.message_id||'')!==String(msg.id))await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
   }catch(e){lastError=String(e.message||e);console.error('attendance-panel',lastError)}
 }
 
@@ -206,5 +246,31 @@ client.on('interactionCreate',async i=>{
   if(i.commandName==='auditoria'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await runAudit(i)}catch(e){await i.editReply(`Falha na auditoria: ${e.message}`)}return}
   if(i.commandName==='sincronizar'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});const target=i.options.getUser('membro',true);try{const r=await api('/api/discord/sync-request',{method:'POST',body:JSON.stringify({discord_id:target.id})});const j=await r.json();await i.editReply(r.ok&&j.ok?`Sincronização de **${j.member}** adicionada à fila.`:`Não foi possível sincronizar: ${j.error||'erro desconhecido'}`)}catch(e){await i.editReply(`Não foi possível sincronizar: ${e.message}`)}return}
 });
+
+let rankMapCache={rows:[],at:0};
+async function getRankMap(){
+  if(Date.now()-rankMapCache.at<60000&&rankMapCache.rows.length)return rankMapCache.rows;
+  try{const r=await api('/api/discord/rank-map');if(r.ok){const j=await r.json();rankMapCache={rows:Array.isArray(j.ranks)?j.ranks:[],at:Date.now()};return rankMapCache.rows}}catch{}
+  return rankMapCache.rows;
+}
+client.on('guildMemberUpdate',async(oldMember,newMember)=>{
+  try{
+    if(newMember.user?.bot)return;
+    const rankMap=await getRankMap();if(!rankMap.length)return;
+    const rankRoleIds=new Set(rankMap.map(r=>String(r.role_id)));
+    const changed=[...newMember.roles.cache.keys()].filter(id=>!oldMember.roles.cache.has(id)).some(id=>rankRoleIds.has(id));
+    if(!changed)return;
+    const mr=await api(`/api/discord/member?discord_id=${newMember.id}`);if(!mr.ok)return;
+    const {member}=await mr.json();const siteRank=String(member.rank_name||'');
+    const allowed=rankMap.find(r=>String(r.rank)===siteRank);
+    const present=rankMap.filter(r=>newMember.roles.cache.has(String(r.role_id)));
+    if(present.length>1||present.some(r=>String(r.rank)!==siteRank)){
+      for(const r of rankMap){const id=String(r.role_id);try{await applyRole(newMember,id,allowed&&id===String(allowed.role_id)?'add':'remove')}catch{}}
+      await syncNickname(newMember,{rank_name:siteRank,game_name:member.game_name,rg:member.rg});
+      await safeDm(newMember,'Foi detectado um cargo de patente incompatível com seu cadastro. A patente correta foi restaurada automaticamente.');
+    }
+  }catch(e){console.warn('rank-guard',e.message)}
+});
+
 client.once('ready',async()=>{console.log(`Bot online como ${client.user.tag}`);try{await registerCommands();console.log('Comandos registrados')}catch(e){lastError=String(e.message||e);console.error('commands',lastError)}setInterval(tick,POLL_MS);setInterval(processPosts,POLL_MS);setInterval(heartbeat,15000);setInterval(updateAttendancePanel,20000);setInterval(()=>upsertCenterPanel().catch(e=>console.warn('center-panel',e.message)),30000);setInterval(()=>upsertPublicPanel().catch(e=>console.warn('public-panel',e.message)),300000);tick();processPosts();heartbeat();updateAttendancePanel();upsertCenterPanel().catch(()=>{});upsertPublicPanel().catch(()=>{})});
 client.login(DISCORD_BOT_TOKEN);
