@@ -5,7 +5,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='6.3.0-v12.3';
+const VERSION='6.4.0-v12.4';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -76,11 +76,15 @@ async function processItem(item){
   else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
   else if(item.kind==='PASSWORD_RESET_APPROVED'){const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`).setLabel('Confirmar nova senha').setStyle(ButtonStyle.Primary));const delivered=await safeDm(member,p.dm_message||'Sua recuperação de senha foi aprovada. Confirme abaixo.',[row]);if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');}
   if(item.kind==='ATTENDANCE_CHALLENGE'){
-    const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Desafio de presença sem ID');
-    const isFinal=p.challenge_type==='FINAL';
-    const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`presence:${challengeId}`).setLabel(isFinal?'Encerrar ponto':'Confirmar presença').setStyle(ButtonStyle.Success));
-    await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||'Confirme sua presença para manter o ponto válido.'}`,[row]);
-  }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||item.kind==='DM_NOTIFY')) await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
+    const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Confirmação final sem ID');
+    const row=new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`presence:${challengeId}`).setLabel('Confirmar e encerrar').setEmoji('✅').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`presence-reject:${challengeId}`).setLabel('Continuar sem confirmar').setEmoji('⚠️').setStyle(ButtonStyle.Secondary)
+    );
+    const embed=new EmbedBuilder().setColor(0xD3A93A).setTitle('⏱️ Meta de serviço concluída').setDescription(p.dm_message||'Confirme para encerrar o ponto. Se continuar, o tempo adicional ficará separado como horas divergentes.').addFields({name:'✅ Horas normais',value:'A meta cumprida permanece registrada.',inline:true},{name:'⚠️ Horas divergentes',value:'Tempo adicional sem confirmação.',inline:true}).setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp();
+    try{await member.send({embeds:[embed],components:[row]})}catch{throw new Error('Não foi possível enviar a confirmação final no privado do membro.')}
+  }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||item.kind==='DM_NOTIFY')) await safeDm(member,`**Centro de Gestão Interna**
+${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
 }
 async function tick(){try{await api('/api/discord/attendance-due',{method:'POST',body:'{}'});const r=await api('/api/discord/queue');if(!r.ok)return;const {items=[]}=await r.json();for(const item of items){try{await processItem(item);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:true})})}catch(e){lastError=String(e.message||e);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('poll',lastError)}}
 async function processPosts(){
@@ -135,32 +139,12 @@ async function updateAttendancePanel(){
   try{
     const r=await api('/api/discord/attendance-panel');if(!r.ok)return;
     const d=await r.json();if(!d.ok||!d.channel_id)return;
-    const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
-    const channel=await guild.channels.fetch(String(d.channel_id));
-    if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido ou não textual');
+    const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(String(d.channel_id));if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido');
     const active=Array.isArray(d.active)?d.active:[];
-    const lines=active.slice(0,20).map((x,i)=>{
-      const min=Math.floor(Number(x.credited_seconds||0)/60);
-      const mode=x.mode==='COMPAT'?'☁️ Leve':'🌐 Normal';
-      const bar='▰'.repeat(Math.min(5,Math.floor(min/12)))+'▱'.repeat(Math.max(0,5-Math.min(5,Math.floor(min/12))));
-      return `**${String(i+1).padStart(2,'0')}. ${x.rank_name} ${x.game_name}**\n${bar}  ${min} min • ${mode}${x.division?` • ${x.division}`:''}`;
-    });
-    const embed=new EmbedBuilder()
-      .setColor(0x155F8D)
-      .setAuthor({name:'PMERJ • Centro de Gestão',...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
-      .setTitle('🟢 EFETIVO EM SERVIÇO')
-      .setDescription(lines.length?lines.join('\n\n'):'> Nenhum membro está com ponto aberto no momento.')
-      .addFields(
-        {name:'👮 Em serviço',value:`**${d.active_count||0}**`,inline:true},
-        {name:'🏛️ Efetivo',value:`**${d.effective||0}**`,inline:true},
-        {name:'⏱️ Meta',value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,inline:true}
-      )
-      .setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'})
-      .setTimestamp(new Date());
-    let msg=null;
-    if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}
-    if(!msg)msg=await channel.send({embeds:[embed]});
-    if(String(d.message_id||'')!==String(msg.id))await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
+    const lines=active.slice(0,20).map((x,i)=>{const normal=Math.floor(Number(x.normal_total??x.credited_seconds??0)/60),div=Math.floor(Number(x.divergent_seconds||0)/60);const status=x.awaiting_confirmation?'🟡 AGUARDANDO CONFIRMAÇÃO':'🟢 EM SERVIÇO';return `**${String(i+1).padStart(2,'0')}. ${x.rank_name} ${x.game_name}**\n${status} • ✅ ${normal} min normal${div>0?` • ⚠️ ${div} min divergente`:''} • ${x.mode==='COMPAT'?'☁️ Leve':'🌐 Normal'}`});
+    const divergentCount=active.filter(x=>Number(x.divergent_seconds||0)>0).length;const waiting=active.filter(x=>x.awaiting_confirmation).length;
+    const embed=new EmbedBuilder().setColor(waiting?0xD3A93A:0x155F8D).setAuthor({name:'PMERJ • Controle de Serviço',...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})}).setTitle('⏱️ PAINEL DE PONTO').setDescription(lines.length?lines.join('\n\n'):'> Nenhum membro está com ponto aberto no momento.').addFields({name:'👮 Em serviço',value:`**${d.active_count||0}**`,inline:true},{name:'🟡 Aguardando confirmação',value:`**${waiting}**`,inline:true},{name:'⚠️ Com divergência',value:`**${divergentCount}**`,inline:true},{name:'🏛️ Efetivo',value:`**${d.effective||0}**`,inline:true},{name:'🎯 Meta',value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,inline:true},{name:'🔔 Confirmação',value:'**Somente ao atingir a meta**',inline:true}).setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp(new Date());
+    let msg=null;if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}if(!msg)msg=await channel.send({embeds:[embed]});if(String(d.message_id||'')!==String(msg.id))await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
   }catch(e){lastError=String(e.message||e);console.error('attendance-panel',lastError)}
 }
 
@@ -235,7 +219,8 @@ async function registerCommands(){
   const rest=new REST({version:'10'}).setToken(DISCORD_BOT_TOKEN);await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID,DISCORD_GUILD_ID),{body:commands});
 }
 client.on('interactionCreate',async i=>{
-  if(i.isButton()&&i.customId.startsWith('presence:')){const challengeId=i.customId.slice('presence:'.length);await i.deferReply({ephemeral:true});try{const r=await api('/api/discord/attendance-confirm',{method:'POST',body:JSON.stringify({discord_id:i.user.id,challenge_id:challengeId})});const j=await r.json();await i.editReply(j.ok?'Presença confirmada com sucesso.':'Não foi possível confirmar: '+(j.error||'desafio expirado.'))}catch{await i.editReply('Não foi possível confirmar a presença agora.')}return}
+  if(i.isButton()&&i.customId.startsWith('presence-reject:')){const challengeId=i.customId.slice('presence-reject:'.length);await i.deferReply({ephemeral:true});try{const r=await api('/api/discord/attendance-reject',{method:'POST',body:JSON.stringify({discord_id:i.user.id,challenge_id:challengeId})});const j=await r.json();await i.editReply(j.ok?'⚠️ Ponto mantido aberto. O tempo adicional será registrado como horas divergentes até você confirmar.':'Não foi possível registrar: '+(j.error||'erro desconhecido.'))}catch{await i.editReply('Não foi possível registrar sua decisão agora.')}return}
+  if(i.isButton()&&i.customId.startsWith('presence:')){const challengeId=i.customId.slice('presence:'.length);await i.deferReply({ephemeral:true});try{const r=await api('/api/discord/attendance-confirm',{method:'POST',body:JSON.stringify({discord_id:i.user.id,challenge_id:challengeId})});const j=await r.json();await i.editReply(j.ok?`✅ Ponto confirmado e encerrado. Normal: ${Math.floor(Number(j.credited_seconds||0)/60)} min • Divergente: ${Math.floor(Number(j.divergent_seconds||0)/60)} min`:'Não foi possível confirmar: '+(j.error||'erro desconhecido.'))}catch{await i.editReply('Não foi possível confirmar o ponto agora.')}return}
   if(i.isButton()&&i.customId.startsWith('password-reset:')){await i.deferReply({ephemeral:true});try{const parts=i.customId.split(':');const requestId=parts[1]||'';const token=parts.slice(2).join(':');const r=await api('/api/discord/password-reset-confirm',{method:'POST',body:JSON.stringify({request_id:requestId,token,discord_id:i.user.id})});const j=await r.json();await i.editReply(j.ok?'✅ Sua senha foi atualizada. Todas as sessões antigas do site foram encerradas.':'❌ Não foi possível alterar: '+(j.error||'confirmação inválida.'))}catch{await i.editReply('❌ Não foi possível concluir a recuperação agora.')}return}
   if(!i.isChatInputCommand())return;
   if(['perfil','verificar'].includes(i.commandName)){await i.deferReply({ephemeral:true});try{const r=await api(`/api/discord/member?discord_id=${i.user.id}`);if(!r.ok){await i.editReply('Seu Discord ID não está vinculado a nenhuma conta aprovada no Centro de Gestão. Use `/registro`.');return}const {member:m}=await r.json();const embed=new EmbedBuilder().setColor(0x1595D3).setAuthor({name:'PMERJ • Centro de Gestão'}).setTitle(`👤 ${m.game_name}`).setDescription('✅ **Discord vinculado ao Centro de Gestão**').addFields({name:'🎖️ Patente',value:m.rank_name||'—',inline:true},{name:'🏢 Divisão',value:m.division||'Sem divisão',inline:true},{name:'✨ EXP',value:String(m.points||0),inline:true},{name:'🛡️ Situação',value:m.inactive_flag?'⚠️ Inativo sinalizado':m.status,inline:true},{name:'🔗 Discord',value:`<@${i.user.id}>`,inline:true}).setFooter({text:'Centro de Gestão • Dados consultados em tempo real'}).setTimestamp();await i.editReply({embeds:[embed]})}catch{await i.editReply('Não foi possível consultar o sistema agora.')}return}
