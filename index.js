@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.1.3';
+const VERSION='13.2.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -28,6 +28,71 @@ async function policeRoleId(){const c=await botConfig();return String(c.police_r
 function templateColor(v,fallback=0x0B4E7A){if(!v)return fallback;const s=String(v).replace('#','');const n=parseInt(s,16);return Number.isFinite(n)?n:fallback}
 function tpl(c,key){return c?.templates?.[key]||{}}
 function componentEmoji(value,fallback){const s=String(value||fallback||'').trim();const m=s.match(/^<(a?):([^:]+):(\d+)>$/);if(m)return {id:m[3],name:m[2],animated:m[1]==='a'};return {name:s||String(fallback||'•')}}
+function renderTemplate(value,ctx={}){
+  return String(value??'').replace(/\{([a-zA-Z0-9_]+)\}/g,(all,key)=>{
+    const v=ctx[key];
+    return v===undefined||v===null?all:String(v);
+  });
+}
+function emojiText(template,key,fallback=''){
+  return String(template?.option_emojis?.[key]||fallback||'').trim();
+}
+function labelText(template,key,fallback=''){
+  return String(template?.option_labels?.[key]||fallback||'').trim();
+}
+function configuredMessage(c,key,fallback,ctx={}){
+  const x=tpl(c,key);
+  const base=x.message_content||fallback||'';
+  const emojiCtx={...ctx};
+  for(const [k,v] of Object.entries(x.option_emojis||{})){
+    emojiCtx[`emoji_${k}`]=String(v);
+  }
+  return renderTemplate(base,emojiCtx);
+}
+function applyTemplateVisual(embed,x,ctx={}){
+  const emojiCtx={...ctx};
+  for(const [k,v] of Object.entries(x?.option_emojis||{})){
+    emojiCtx[`emoji_${k}`]=String(v);
+  }
+  if(x?.title)embed.setTitle(renderTemplate(x.title,emojiCtx).slice(0,256));
+  if(x?.description)embed.setDescription(renderTemplate(x.description,emojiCtx).slice(0,4000));
+  if(x?.footer)embed.setFooter({text:renderTemplate(x.footer,emojiCtx).slice(0,2048)});
+  if(x?.image_url)embed.setImage(String(x.image_url));
+  if(x?.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
+  return embed;
+}
+function dmTemplateKey(kind){
+  const map={
+    ACCESS_APPROVED:'access_approved_dm',
+    RANK_CHANGE:'rank_change_dm',
+    DIVISION_CHANGE:'division_change_dm',
+    MEDAL_ADD:'medal_dm',
+    COURSE_ADD:'course_dm',
+    FULL_SYNC:'sync_dm',
+    DM_ONLY:'absence_dm',
+    MEMBER_DISMISSED:'dismissed_dm',
+    DM_NOTIFY:'generic_dm'
+  };
+  return map[String(kind||'')]||'generic_dm';
+}
+function postTemplateKey(sourceType){
+  const map={
+    ACTION:'action_post',
+    SEIZURE:'seizure_post',
+    PUNISHMENT:'discipline_post',
+    DISCIPLINE:'discipline_post',
+    DISMISSAL:'dismissal_post',
+    PROMOTION:'promotion_post',
+    DEMOTION:'demotion_post',
+    COMPLAINT:'complaint_post',
+    PUBLIC_COMPLAINT:'complaint_post',
+    ATTENDANCE_START:'attendance_start',
+    ATTENDANCE_OVERTIME:'attendance_overtime',
+    ATTENDANCE_END:'attendance_end'
+  };
+  return map[String(sourceType||'')]||'action_post';
+}
+
 async function canUseAdminCommand(interaction){
   if(!interaction.inGuild())return false;
   const member=interaction.member;
@@ -37,8 +102,17 @@ async function canUseAdminCommand(interaction){
 }
 async function guardAdminCommand(interaction){
   if(await canUseAdminCommand(interaction))return true;
-  if(!interaction.deferred&&!interaction.replied)await interaction.reply({content:'🔒 Este comando é restrito ao Alto Comando/administradores autorizados.',ephemeral:true});
-  else await interaction.editReply('🔒 Este comando é restrito ao Alto Comando/administradores autorizados.');
+  const c=await botConfig();
+  const content=configuredMessage(
+    c,
+    'access_denied',
+    '🔒 Este comando é restrito ao Alto Comando/administradores autorizados.'
+  );
+  if(!interaction.deferred&&!interaction.replied){
+    await interaction.reply({content,ephemeral:true});
+  }else{
+    await interaction.editReply(content);
+  }
   return false;
 }
 
@@ -88,117 +162,724 @@ async function processItem(item){
   else if(['MEDAL_ADD','COURSE_ADD','SPECIAL_ROLE_ADD'].includes(item.kind)){await applyRole(member,p.discord_role_id,'add')}
   else if(['MEDAL_REMOVE','COURSE_REMOVE','SPECIAL_ROLE_REMOVE'].includes(item.kind)){await applyRole(member,p.discord_role_id,'remove')}
   else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
-  else if(item.kind==='PASSWORD_RESET_APPROVED'){const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`).setLabel('Confirmar nova senha').setStyle(ButtonStyle.Primary));const delivered=await safeDm(member,p.dm_message||'Sua recuperação de senha foi aprovada. Confirme abaixo.',[row]);if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');}
+  else if(item.kind==='PASSWORD_RESET_APPROVED'){
+    const c=await botConfig();const x=tpl(c,'password_reset');
+    const row=new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`)
+        .setLabel(labelText(x,'button','Confirmar nova senha'))
+        .setStyle(ButtonStyle.Primary)
+    );
+    const content=configuredMessage(
+      c,
+      'password_reset',
+      p.dm_message||'🔐 Sua recuperação de senha foi aprovada. Confirme abaixo.',
+      {message:p.dm_message||''}
+    );
+    const delivered=await safeDm(member,content,[row]);
+    if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');
+  }
   if(item.kind==='ATTENDANCE_CHALLENGE'){
     const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Confirmação de ponto sem ID');
     const c=await botConfig();const x=tpl(c,'attendance_confirm');const em=x.option_emojis||{};
     const menu=new StringSelectMenuBuilder().setCustomId(`attendance-confirm:${challengeId}`).setPlaceholder('Selecione como deseja prosseguir').addOptions(
-      {label:'Sair de serviço',description:'Confirma o ciclo e encerra o turno',value:'END',emoji:componentEmoji(em.end,'✅')},
-      {label:'Continuar em serviço',description:'Confirma e inicia um novo ciclo de 1 hora',value:'OVERTIME',emoji:componentEmoji(em.continue,'➕')}
+      {label:labelText(x,'end','Sair de serviço'),description:'Confirma o ciclo e encerra o turno',value:'END',emoji:componentEmoji(em.end,'✅')},
+      {label:labelText(x,'continue','Continuar em serviço'),description:'Confirma e inicia um novo ciclo de 1 hora',value:'OVERTIME',emoji:componentEmoji(em.continue,'➕')}
     );
     const row=new ActionRowBuilder().addComponents(menu);
-    const embed=new EmbedBuilder().setColor(templateColor(x.color,0xD6A931)).setTitle(x.title||`⏱️ Confirmação de Serviço • ${Number(p.cycle_no||1)}h`).setDescription(p.dm_message||x.description||'Você completou mais um ciclo de serviço. Enquanto não responder, o tempo adicional fica como horas divergentes.').addFields({name:`${String(em.pending||'⚠️')} Sem resposta`,value:'O ponto continua aberto e o tempo adicional fica salvo como divergente.',inline:false}).setFooter({text:x.footer||'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp();
+    const embed=new EmbedBuilder().setColor(templateColor(x.color,0xD6A931));
+    applyTemplateVisual(embed,x,{
+      cycle:Number(p.cycle_no||1),
+      message:p.dm_message||'',
+      description:p.dm_message||x.description||''
+    });
+    if(!x.title)embed.setTitle(`⏱️ Confirmação de Serviço • ${Number(p.cycle_no||1)}h`);
+    if(p.dm_message&&!x.description)embed.setDescription(p.dm_message);
+    embed.addFields({
+      name:`${String(em.pending||'⚠️')} Sem resposta`,
+      value:String(x.field_overrides?.pending||'O ponto continua aberto e o tempo adicional fica salvo como divergente.'),
+      inline:false
+    }).setTimestamp();
     if(x.image_url)embed.setImage(String(x.image_url));if(x.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
     try{await member.send({embeds:[embed],components:[row]})}catch{throw new Error('Não foi possível enviar a confirmação no privado do membro.')}
-  }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||item.kind==='DM_NOTIFY')) await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
+  }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||p.message||item.kind==='DM_NOTIFY')){
+    const c=await botConfig();
+    const key=dmTemplateKey(item.kind);
+    const original=String(
+      p.dm_message||
+      p.message||
+      'Você possui uma nova atualização no Centro de Gestão Interna.'
+    );
+    const content=configuredMessage(
+      c,
+      key,
+      '{message}',
+      {
+        message:original,
+        member:p.game_name||member.displayName||member.user.username,
+        rank:p.rank_name||'',
+        division:p.division_name||p.division||'',
+        from:p.from||'',
+        to:p.to||'',
+        name:p.name||''
+      }
+    );
+    await safeDm(member,content);
+  }
 }
 async function tick(){try{await api('/api/discord/attendance-due',{method:'POST',body:'{}'});const r=await api('/api/discord/queue');if(!r.ok)return;const {items=[]}=await r.json();for(const item of items){try{await processItem(item);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:true})})}catch(e){lastError=String(e.message||e);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('poll',lastError)}}
 async function processPosts(){
   try{
-    const r=await api('/api/discord/posts');if(!r.ok)return;
+    const r=await api('/api/discord/posts');
+    if(!r.ok)return;
+
     const {items=[],channels={}}=await r.json();
+    const c=await botConfig();
+
     for(const item of items){
       try{
         const channelId=channels[item.channel_key];
-        if(!channelId)throw new Error(`Canal não configurado para ${item.channel_key}`);
-        const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
-        const channel=await guild.channels.fetch(channelId);
-        if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');
+        if(!channelId){
+          throw new Error(
+            `Canal não configurado para ${item.channel_key}`
+          );
+        }
+
+        const guild=await client.guilds.fetch(
+          DISCORD_GUILD_ID
+        );
+
+        const channel=await guild.channels.fetch(
+          channelId
+        );
+
+        if(!channel||!channel.isTextBased()){
+          throw new Error(
+            'Canal inválido ou não textual'
+          );
+        }
+
         const p=item.payload||{};
-        const colors={ACTION:0x1B6FA8,SEIZURE:0x0E8E9D,PUNISHMENT:0xB5394C,DISMISSAL:0x7C2636,PROMOTION:0x198D62,DEMOTION:0xB96B16,COMPLAINT:0x8E5AB5,PUBLIC_COMPLAINT:0x8E5AB5,ATTENDANCE_START:0x178B61,ATTENDANCE_END:0xB53A45,ATTENDANCE_OVERTIME:0x267BC5};
-        const icon=item.source_type==='ACTION'?'🚔':item.source_type==='SEIZURE'?'📦':item.source_type==='PUNISHMENT'?'⚠️':item.source_type==='PROMOTION'?'⬆️':item.source_type==='DEMOTION'?'⬇️':item.source_type==='ATTENDANCE_START'?'🟢':item.source_type==='ATTENDANCE_END'?'🔴':item.source_type==='ATTENDANCE_OVERTIME'?'🔵':'🛡️';
+        const key=postTemplateKey(item.source_type);
+        const x=tpl(c,key);
+        const em=x.option_emojis||{};
+
+        const fallbackColors={
+          ACTION:0x1B6FA8,
+          SEIZURE:0x0E8E9D,
+          PUNISHMENT:0xB5394C,
+          DISCIPLINE:0xB5394C,
+          DISMISSAL:0x7C2636,
+          PROMOTION:0x198D62,
+          DEMOTION:0xB96B16,
+          COMPLAINT:0x8E5AB5,
+          PUBLIC_COMPLAINT:0x8E5AB5,
+          ATTENDANCE_START:0x178B61,
+          ATTENDANCE_END:0xB53A45,
+          ATTENDANCE_OVERTIME:0x267BC5
+        };
+
+        const ctx={
+          title:String(p.title||'Relatório PMERJ'),
+          description:String(p.description||'Sem descrição.'),
+          footer:String(
+            p.footer||
+            'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'
+          ),
+          source_type:String(item.source_type||''),
+          source_id:String(item.source_id||''),
+          xp:String(p.xp_reward||0)
+        };
+
+        const authorEmoji=emojiText(
+          x,
+          'author',
+          '🛡️'
+        );
+
         const embed=new EmbedBuilder()
-          .setColor(colors[item.source_type]||0x1B6FA8)
-          .setAuthor({name:`${icon} PMERJ • Centro de Gestão`,...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
-          .setTitle(String(p.title||'Relatório PMERJ').slice(0,256))
-          .setDescription(String(p.description||'Sem descrição.').slice(0,4000));
+          .setColor(
+            templateColor(
+              x.color,
+              fallbackColors[item.source_type]||0x1B6FA8
+            )
+          )
+          .setAuthor({
+            name:`${authorEmoji} PMERJ • Centro de Gestão`,
+            ...(guild.iconURL?.()
+              ? {iconURL:guild.iconURL()}
+              : {})
+          });
+
+        applyTemplateVisual(
+          embed,
+          x,
+          ctx
+        );
+
+        if(!x.title){
+          embed.setTitle(ctx.title.slice(0,256));
+        }
+
+        if(!x.description){
+          embed.setDescription(
+            ctx.description.slice(0,4000)
+          );
+        }
 
         if(Array.isArray(p.fields)){
-          const pretty=p.fields.slice(0,25).map(f=>({
-            name:String(f.name||'Informação').slice(0,256),
-            value:String(f.value||'—').slice(0,1024),
-            inline:!!f.inline
-          }));
+          const pretty=p.fields
+            .slice(0,25)
+            .map(f=>({
+              name:String(
+                x.field_overrides?.[String(f.name||'')]||
+                f.name||
+                'Informação'
+              ).slice(0,256),
+              value:String(f.value||'—').slice(0,1024),
+              inline:!!f.inline
+            }));
+
           embed.addFields(pretty);
         }
-        if(p.xp_reward)embed.addFields({name:'✦ EXP da atividade',value:`+${p.xp_reward} EXP por participante`,inline:true});
-        if(p.occurred_at)embed.addFields({name:'🕒 Data do registro',value:`<t:${Math.floor(new Date(p.occurred_at).getTime()/1000)}:f>`,inline:true});
-        if(p.author_avatar&&/^https?:\/\//i.test(String(p.author_avatar)))embed.setThumbnail(String(p.author_avatar));
-        if(p.footer)embed.setFooter({text:String(p.footer).slice(0,2048)});
+
+        if(p.xp_reward){
+          embed.addFields({
+            name:`${emojiText(x,'xp','✦')} EXP da atividade`,
+            value:`+${p.xp_reward} EXP por participante`,
+            inline:true
+          });
+        }
+
+        if(p.occurred_at){
+          embed.addFields({
+            name:`${emojiText(x,'date','🕒')} Data do registro`,
+            value:`<t:${Math.floor(new Date(p.occurred_at).getTime()/1000)}:f>`,
+            inline:true
+          });
+        }
+
+        if(
+          p.author_avatar&&
+          /^https?:\/\//i.test(String(p.author_avatar))&&
+          !x.thumbnail_url
+        ){
+          embed.setThumbnail(
+            String(p.author_avatar)
+          );
+        }
+
+        if(!x.footer&&p.footer){
+          embed.setFooter({
+            text:String(p.footer).slice(0,2048)
+          });
+        }
+
         embed.setTimestamp(new Date());
 
-        const images=Array.isArray(p.images)?p.images.filter(x=>/^https?:\/\//i.test(String(x))).slice(0,3):[];
-        if(images[0])embed.setImage(String(images[0]));
+        const images=Array.isArray(p.images)
+          ? p.images
+              .filter(url=>
+                /^https?:\/\//i.test(String(url))
+              )
+              .slice(0,3)
+          : [];
+
+        if(images[0]&&!x.image_url){
+          embed.setImage(String(images[0]));
+        }
+
         const embeds=[embed];
-        for(const url of images.slice(1))embeds.push(new EmbedBuilder().setColor(colors[item.source_type]||0x1B6FA8).setImage(String(url)));
+
+        for(const url of images.slice(1)){
+          embeds.push(
+            new EmbedBuilder()
+              .setColor(
+                templateColor(
+                  x.color,
+                  fallbackColors[item.source_type]||0x1B6FA8
+                )
+              )
+              .setImage(String(url))
+          );
+        }
+
         const msg=await channel.send({embeds});
-        await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:true,discord_message_id:msg.id})});
+
+        await api(
+          '/api/discord/posts',
+          {
+            method:'POST',
+            body:JSON.stringify({
+              id:item.id,
+              success:true,
+              discord_message_id:msg.id
+            })
+          }
+        );
       }catch(e){
         lastError=String(e.message||e);
-        await api('/api/discord/posts',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})});
+
+        await api(
+          '/api/discord/posts',
+          {
+            method:'POST',
+            body:JSON.stringify({
+              id:item.id,
+              success:false,
+              error:lastError
+            })
+          }
+        );
       }
     }
-  }catch(e){lastError=String(e.message||e);console.error('posts',lastError)}
+  }catch(e){
+    lastError=String(e.message||e);
+    console.error('posts',lastError);
+  }
 }
 
 async function updateAttendancePanel(){
   try{
-    const r=await api('/api/discord/attendance-panel');if(!r.ok)return;
-    const d=await r.json();if(!d.ok||!d.channel_id)return;
-    const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
-    const channel=await guild.channels.fetch(String(d.channel_id));
-    if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido ou não textual');
-    const active=Array.isArray(d.active)?d.active:[];
-    const lines=active.slice(0,20).map((x,i)=>{
-      const min=Math.floor(Number(x.credited_seconds||0)/60);
-      const mode=x.mode==='COMPAT'?'☁️ Leve':'🌐 Normal';
-      const bar='▰'.repeat(Math.min(5,Math.floor(min/12)))+'▱'.repeat(Math.max(0,5-Math.min(5,Math.floor(min/12))));
-      return `**${String(i+1).padStart(2,'0')}. ${x.rank_name} ${x.game_name}**\n${bar}  ${min} min • ${mode}${x.division?` • ${x.division}`:''}`;
-    });
+    const r=await api('/api/discord/attendance-panel');
+    if(!r.ok)return;
+
+    const d=await r.json();
+    if(!d.ok||!d.channel_id)return;
+
+    const c=await botConfig();
+    const x=tpl(c,'attendance_live_panel');
+    const em=x.option_emojis||{};
+
+    const guild=await client.guilds.fetch(
+      DISCORD_GUILD_ID
+    );
+
+    const channel=await guild.channels.fetch(
+      String(d.channel_id)
+    );
+
+    if(!channel||!channel.isTextBased()){
+      throw new Error(
+        'Canal do painel de ponto inválido ou não textual'
+      );
+    }
+
+    const active=Array.isArray(d.active)
+      ? d.active
+      : [];
+
+    const lines=active
+      .slice(0,20)
+      .map((member,index)=>{
+        const min=Math.floor(
+          Number(member.credited_seconds||0)/60
+        );
+
+        const mode=
+          member.mode==='COMPAT'
+            ? `${emojiText(x,'light','☁️')} Leve`
+            : `${emojiText(x,'normal_mode','🌐')} Normal`;
+
+        const bar=
+          '▰'.repeat(
+            Math.min(5,Math.floor(min/12))
+          )+
+          '▱'.repeat(
+            Math.max(
+              0,
+              5-Math.min(5,Math.floor(min/12))
+            )
+          );
+
+        return (
+          `**${String(index+1).padStart(2,'0')}. `+
+          `${member.rank_name} ${member.game_name}**\n`+
+          `${bar}  ${min} min • ${mode}`+
+          `${member.division?' • '+member.division:''}`
+        );
+      });
+
+    const ctx={
+      active_lines:
+        lines.length
+          ? lines.join('\n\n')
+          : '> Nenhum membro está com ponto aberto no momento.'
+    };
+
     const embed=new EmbedBuilder()
-      .setColor(0x155F8D)
-      .setAuthor({name:'PMERJ • Centro de Gestão',...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
-      .setTitle('🟢 EFETIVO EM SERVIÇO')
-      .setDescription(lines.length?lines.join('\n\n'):'> Nenhum membro está com ponto aberto no momento.')
-      .addFields(
-        {name:'👮 Em serviço',value:`**${d.active_count||0}**`,inline:true},
-        {name:'🏛️ Efetivo',value:`**${d.effective||0}**`,inline:true},
-        {name:'⏱️ Meta',value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,inline:true}
-      )
-      .setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'})
-      .setTimestamp(new Date());
+      .setColor(templateColor(x.color,0x155F8D))
+      .setAuthor({
+        name:`${emojiText(x,'online','🟢')} PMERJ • Centro de Gestão`,
+        ...(guild.iconURL?.()
+          ? {iconURL:guild.iconURL()}
+          : {})
+      });
+
+    applyTemplateVisual(embed,x,ctx);
+
+    if(!x.title){
+      embed.setTitle(
+        `${emojiText(x,'online','🟢')} EFETIVO EM SERVIÇO`
+      );
+    }
+
+    if(!x.description){
+      embed.setDescription(ctx.active_lines);
+    }
+
+    embed.addFields(
+      {
+        name:`${emojiText(x,'member','👮')} Em serviço`,
+        value:`**${d.active_count||0}**`,
+        inline:true
+      },
+      {
+        name:`${emojiText(x,'effective','🏛️')} Efetivo`,
+        value:`**${d.effective||0}**`,
+        inline:true
+      },
+      {
+        name:`${emojiText(x,'goal','⏱️')} Meta`,
+        value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,
+        inline:true
+      }
+    ).setTimestamp(new Date());
+
     let msg=null;
-    if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}
-    if(!msg)msg=await channel.send({embeds:[embed]});
-    if(String(d.message_id||'')!==String(msg.id))await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
-  }catch(e){lastError=String(e.message||e);console.error('attendance-panel',lastError)}
+
+    if(d.message_id){
+      try{
+        msg=await channel.messages.fetch(
+          String(d.message_id)
+        );
+
+        await msg.edit({embeds:[embed]});
+      }catch{
+        msg=null;
+      }
+    }
+
+    if(!msg){
+      msg=await channel.send({embeds:[embed]});
+    }
+
+    if(
+      String(d.message_id||'')!==
+      String(msg.id)
+    ){
+      await api(
+        '/api/discord/attendance-panel',
+        {
+          method:'POST',
+          body:JSON.stringify({
+            channel_id:String(d.channel_id),
+            message_id:String(msg.id)
+          })
+        }
+      );
+    }
+  }catch(e){
+    lastError=String(e.message||e);
+    console.error(
+      'attendance-panel',
+      lastError
+    );
+  }
 }
 
 async function upsertCenterPanel(forceChannel=null){
-  const r=await api('/api/discord/system-panel'); if(!r.ok)throw new Error('API do painel indisponível'); const d=await r.json();
-  const channelId=String(forceChannel||d.channel_id||''); if(!channelId)return null; const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);if(!channel?.isTextBased())throw new Error('Canal do Centro inválido');
-  let health={ok:false,database:'ERROR',latency_ms:0};try{const hr=await fetch(`${SITE_URL.replace(/\/$/,'')}/api/system/health`,{cache:'no-store'});health=await hr.json()}catch{}
-  const embed=new EmbedBuilder().setColor(health.ok?0x1595D3:0xC43D4B).setAuthor({name:'PMERJ • Centro de Gestão',...(guild.iconURL()?{iconURL:guild.iconURL()}: {})}).setTitle('🛡️ CENTRO DE GESTÃO • STATUS AO VIVO').setDescription(health.ok?'🟢 **Sistema operacional**\nDados consultados em tempo real.':'🔴 **Sistema indisponível ou degradado**').addFields({name:'🌐 Site',value:health.ok?'ONLINE':'INDISPONÍVEL',inline:true},{name:'🗄️ Banco',value:String(health.database||'ERRO'),inline:true},{name:'🤖 Bot',value:'ONLINE',inline:true},{name:'⚡ Latência',value:`${health.latency_ms||0} ms`,inline:true},{name:'👮 Efetivo',value:String(d.effective||0),inline:true},{name:'🟢 Em serviço',value:String(d.active||0),inline:true},{name:'🚔 Ações',value:String(d.actions||0),inline:true},{name:'📦 Apreensões',value:String(d.seizures||0),inline:true},{name:'🛡️ Casos Corregedoria',value:String(d.complaints||0),inline:true}).setFooter({text:'Atualização automática • Centro de Gestão'}).setTimestamp();
-  const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(SITE_URL).setLabel('Acessar Centro de Gestão'),new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(`${SITE_URL.replace(/\/$/,'')}/register`).setLabel('Realizar registro'));
-  let msg=null;if(d.message_id&&!forceChannel){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed],components:[row]})}catch{}}
-  if(!msg)msg=await channel.send({embeds:[embed],components:[row]});await api('/api/discord/system-panel',{method:'POST',body:JSON.stringify({channel_id:channelId,message_id:msg.id})});return msg;
+  const r=await api('/api/discord/system-panel');
+  if(!r.ok)throw new Error('API do painel indisponível');
+
+  const d=await r.json();
+  const channelId=String(
+    forceChannel||d.channel_id||''
+  );
+
+  if(!channelId)return null;
+
+  const c=await botConfig();
+  const x=tpl(c,'system_panel');
+
+  const guild=await client.guilds.fetch(
+    DISCORD_GUILD_ID
+  );
+
+  const channel=await guild.channels.fetch(
+    channelId
+  );
+
+  if(!channel?.isTextBased()){
+    throw new Error('Canal do Centro inválido');
+  }
+
+  let health={
+    ok:false,
+    database:'ERROR',
+    latency_ms:0
+  };
+
+  try{
+    const hr=await fetch(
+      `${SITE_URL.replace(/\/$/,'')}/api/system/health`,
+      {cache:'no-store'}
+    );
+    health=await hr.json();
+  }catch{}
+
+  const healthDescription=
+    health.ok
+      ? `${emojiText(x,'ok','🟢')} **Sistema operacional**\nDados consultados em tempo real.`
+      : `${emojiText(x,'error','🔴')} **Sistema indisponível ou degradado**`;
+
+  const embed=new EmbedBuilder()
+    .setColor(
+      templateColor(
+        x.color,
+        health.ok?0x1595D3:0xC43D4B
+      )
+    )
+    .setAuthor({
+      name:`${emojiText(x,'shield','🛡️')} PMERJ • Centro de Gestão`,
+      ...(guild.iconURL()
+        ? {iconURL:guild.iconURL()}
+        : {})
+    });
+
+  applyTemplateVisual(
+    embed,
+    x,
+    {
+      health_description:healthDescription
+    }
+  );
+
+  if(!x.title){
+    embed.setTitle(
+      `${emojiText(x,'shield','🛡️')} CENTRO DE GESTÃO • STATUS AO VIVO`
+    );
+  }
+
+  if(!x.description){
+    embed.setDescription(healthDescription);
+  }
+
+  embed.addFields(
+    {
+      name:`${emojiText(x,'site','🌐')} Site`,
+      value:health.ok?'ONLINE':'INDISPONÍVEL',
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'database','🗄️')} Banco`,
+      value:String(health.database||'ERRO'),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'bot','🤖')} Bot`,
+      value:'ONLINE',
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'latency','⚡')} Latência`,
+      value:`${health.latency_ms||0} ms`,
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'member','👮')} Efetivo`,
+      value:String(d.effective||0),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'service','🟢')} Em serviço`,
+      value:String(d.active||0),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'action','🚔')} Ações`,
+      value:String(d.actions||0),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'seizure','📦')} Apreensões`,
+      value:String(d.seizures||0),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'complaint','🛡️')} Casos Corregedoria`,
+      value:String(d.complaints||0),
+      inline:true
+    }
+  ).setTimestamp();
+
+  const row=new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setStyle(ButtonStyle.Link)
+      .setURL(SITE_URL)
+      .setLabel(
+        labelText(
+          x,
+          'open',
+          'Acessar Centro de Gestão'
+        )
+      ),
+    new ButtonBuilder()
+      .setStyle(ButtonStyle.Link)
+      .setURL(
+        `${SITE_URL.replace(/\/$/,'')}/register`
+      )
+      .setLabel(
+        labelText(
+          x,
+          'register',
+          'Realizar registro'
+        )
+      )
+  );
+
+  let msg=null;
+
+  if(d.message_id&&!forceChannel){
+    try{
+      msg=await channel.messages.fetch(
+        String(d.message_id)
+      );
+
+      await msg.edit({
+        embeds:[embed],
+        components:[row]
+      });
+    }catch{}
+  }
+
+  if(!msg){
+    msg=await channel.send({
+      embeds:[embed],
+      components:[row]
+    });
+  }
+
+  await api(
+    '/api/discord/system-panel',
+    {
+      method:'POST',
+      body:JSON.stringify({
+        channel_id:channelId,
+        message_id:msg.id
+      })
+    }
+  );
+
+  return msg;
 }
+
 async function upsertPublicPanel(forceChannel=null){
- const r=await api('/api/discord/public-panel');if(!r.ok)throw new Error('API do Portal indisponível');const d=await r.json();const channelId=String(forceChannel||d.public_channel_id||'');if(!channelId)return null;const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const channel=await guild.channels.fetch(channelId);if(!channel?.isTextBased())throw new Error('Canal do Portal inválido');
- const portalEmbed=new EmbedBuilder().setColor(0x0B4F8A).setTitle('🏛️ PMERJ WEBSITE').setDescription('O nosso **website** é a plataforma de gestão e atendimento da Polícia Militar do Estado do Rio de Janeiro - Reduto Online, focada em duas funções públicas principais:\n\n• 🛡️ **Denúncias Anônimas**\n• 📋 **Recrutamento Oficial:** inscrições e informações sobre novos concursos e ingresso na corporação.').setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'});if(d.public_top_image_url)portalEmbed.setThumbnail(d.public_top_image_url);if(d.public_bottom_image_url)portalEmbed.setImage(d.public_bottom_image_url);const embeds=[portalEmbed];
- const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(SITE_URL).setLabel('Acessar o Portal'));
- let msg=null;if(d.public_message_id&&!forceChannel){try{msg=await channel.messages.fetch(String(d.public_message_id));await msg.edit({embeds,components:[row]})}catch{}}if(!msg)msg=await channel.send({embeds,components:[row]});await api('/api/discord/public-panel',{method:'POST',body:JSON.stringify({channel_id:channelId,message_id:msg.id})});return msg;
+  const r=await api('/api/discord/public-panel');
+  if(!r.ok)throw new Error('API do Portal indisponível');
+
+  const d=await r.json();
+  const channelId=String(
+    forceChannel||d.public_channel_id||''
+  );
+
+  if(!channelId)return null;
+
+  const c=await botConfig();
+  const x=tpl(c,'public_portal');
+
+  const guild=await client.guilds.fetch(
+    DISCORD_GUILD_ID
+  );
+
+  const channel=await guild.channels.fetch(
+    channelId
+  );
+
+  if(!channel?.isTextBased()){
+    throw new Error('Canal do Portal inválido');
+  }
+
+  const embed=new EmbedBuilder()
+    .setColor(templateColor(x.color,0x0B4F8A));
+
+  applyTemplateVisual(embed,x,{});
+
+  if(!x.title){
+    embed.setTitle(
+      `${emojiText(x,'portal','🏛️')} PMERJ WEBSITE`
+    );
+  }
+
+  if(!x.description){
+    embed.setDescription(
+      'O nosso **website** é a plataforma de gestão e atendimento da Polícia Militar do Estado do Rio de Janeiro - Reduto Online.'
+    );
+  }
+
+  if(
+    d.public_top_image_url&&
+    !x.thumbnail_url
+  ){
+    embed.setThumbnail(d.public_top_image_url);
+  }
+
+  if(
+    d.public_bottom_image_url&&
+    !x.image_url
+  ){
+    embed.setImage(d.public_bottom_image_url);
+  }
+
+  const row=new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setStyle(ButtonStyle.Link)
+      .setURL(SITE_URL)
+      .setLabel(
+        labelText(
+          x,
+          'open',
+          'Acessar o Portal'
+        )
+      )
+  );
+
+  let msg=null;
+
+  if(d.public_message_id&&!forceChannel){
+    try{
+      msg=await channel.messages.fetch(
+        String(d.public_message_id)
+      );
+
+      await msg.edit({
+        embeds:[embed],
+        components:[row]
+      });
+    }catch{}
+  }
+
+  if(!msg){
+    msg=await channel.send({
+      embeds:[embed],
+      components:[row]
+    });
+  }
+
+  await api(
+    '/api/discord/public-panel',
+    {
+      method:'POST',
+      body:JSON.stringify({
+        channel_id:channelId,
+        message_id:msg.id
+      })
+    }
+  );
+
+  return msg;
 }
+
 async function heartbeat(){try{await api('/api/discord/heartbeat',{method:'POST',body:JSON.stringify({bot_user_id:client.user?.id,bot_tag:client.user?.tag,guild_id:DISCORD_GUILD_ID,version:VERSION,latency_ms:Math.round(client.ws.ping||0),started_at:startedAt,last_error:lastError||null,metadata:{railway:true}})});lastError=''}catch(e){lastError=String(e.message||e)}}
 async function registrationLink(discordId){const r=await api('/api/discord/registration-link',{method:'POST',body:JSON.stringify({discord_id:discordId})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Não foi possível gerar o link');return j.url}
 async function runAudit(interaction){
@@ -237,34 +918,325 @@ async function runAudit(interaction){
   const missing=site.filter(u=>u.discord_id&&!policeIds.has(String(u.discord_id))).map(u=>`${u.rank_name} ${u.game_name} - ${u.rg} | Discord ${u.discord_id}`);
   const text=[`AUDITORIA DO EFETIVO PM - ${new Date().toLocaleString('pt-BR')}`,'',`SERVIDOR: ${guild.name}`,`CARGO AUDITADO: ${policeRole.name}`,`MEMBROS COM POLÍCIA MILITAR: ${guildPolice.length}`,`CADASTRADOS NO SITE E PRESENTES: ${registered.length}`,`SEM CONTA NO SITE: ${unregistered.length}`,`CONTAS DO SITE FORA DO EFETIVO PM: ${missing.length}`,`APELIDO DIVERGENTE: ${mismatches.length}`,'','=== CADASTRADOS ===',...registered,'','=== PM SEM CONTA NO SITE ===',...unregistered,'','=== CONTA NO SITE / NÃO LOCALIZADO NO EFETIVO PM ===',...missing,'','=== APELIDOS DIVERGENTES ===',...mismatches].join('\n');
   await api('/api/discord/audit-result',{method:'POST',body:JSON.stringify({requested_by_discord_id:interaction.user.id,guild_member_count:guildPolice.length,registered_count:registered.length,unregistered_count:unregistered.length,missing_from_guild_count:missing.length,nickname_mismatch_count:mismatches.length,summary:{guild_name:guild.name,police_role_id:policeRole.id,police_role_name:policeRole.name}})});
-  const embed=new EmbedBuilder().setTitle('Auditoria do Efetivo PM').setDescription(`Auditoria limitada aos membros com o cargo **${policeRole.name}**.`).addFields({name:'Efetivo auditado',value:String(guildPolice.length),inline:true},{name:'Com conta',value:String(registered.length),inline:true},{name:'Sem conta',value:String(unregistered.length),inline:true},{name:'Fora do efetivo',value:String(missing.length),inline:true},{name:'Nome divergente',value:String(mismatches.length),inline:true}).setTimestamp();
+  const c=await botConfig();const x=tpl(c,'audit');const em=x.option_emojis||{};const embed=new EmbedBuilder().setColor(templateColor(x.color,0x0B4E7A));applyTemplateVisual(embed,x,{police_role:policeRole.name});if(!x.title)embed.setTitle(`${String(em.audit||'🔎')} Auditoria do Efetivo PM`);if(!x.description)embed.setDescription(`Auditoria limitada aos membros com o cargo **${policeRole.name}**.`);embed.addFields({name:`${String(em.effective||'👮')} Efetivo auditado`,value:String(guildPolice.length),inline:true},{name:`${String(em.registered||'✅')} Com conta`,value:String(registered.length),inline:true},{name:`${String(em.unregistered||'⚠️')} Sem conta`,value:String(unregistered.length),inline:true},{name:`${String(em.missing||'❌')} Fora do efetivo`,value:String(missing.length),inline:true},{name:`${String(em.nickname||'📝')} Nome divergente`,value:String(mismatches.length),inline:true}).setTimestamp();
   const file=new AttachmentBuilder(Buffer.from(text,'utf8'),{name:`auditoria-pm-${Date.now()}.txt`});
   await interaction.editReply({embeds:[embed],files:[file]});
 }
 
 async function attendancePanelPayload(){
-  const c=await botConfig();const x=tpl(c,'attendance_panel');const em=x.option_emojis||{};
-  const menu=new StringSelectMenuBuilder().setCustomId('attendance-menu').setPlaceholder('Selecione uma opção').addOptions(
-    {label:'Iniciar turno',value:'START',description:'Entrar em serviço',emoji:componentEmoji(em.start,'🟢')},
-    {label:'Encerrar turno',value:'STOP',description:'Sair de serviço',emoji:componentEmoji(em.stop,'🔴')},
-    {label:'Consultar minhas horas',value:'STATUS',description:'Resumo do turno de hoje',emoji:componentEmoji(em.hours,'⏱️')},
-    {label:'Hora extra',value:'OVERTIME',description:'Consultar/liberar hora extra após a confirmação',emoji:componentEmoji(em.overtime,'➕')},
-    {label:'Meu histórico',value:'HISTORY',description:'Últimas datas registradas',emoji:componentEmoji(em.history,'📅')},
-    {label:'Regras do ponto',value:'RULES',description:'Quando abrir e como as horas funcionam',emoji:componentEmoji(em.rules,'📖')}
+  const c=await botConfig();
+  const x=tpl(c,'attendance_panel');
+  const em=x.option_emojis||{};
+
+  const menu=new StringSelectMenuBuilder()
+    .setCustomId('attendance-menu')
+    .setPlaceholder(
+      labelText(
+        x,
+        'placeholder',
+        'Selecione uma opção'
+      )
+    )
+    .addOptions(
+      {
+        label:labelText(x,'start','Iniciar turno'),
+        value:'START',
+        description:'Entrar em serviço',
+        emoji:componentEmoji(em.start,'🟢')
+      },
+      {
+        label:labelText(x,'stop','Encerrar turno'),
+        value:'STOP',
+        description:'Sair de serviço',
+        emoji:componentEmoji(em.stop,'🔴')
+      },
+      {
+        label:labelText(x,'hours','Consultar minhas horas'),
+        value:'STATUS',
+        description:'Horas normais, extras e divergentes',
+        emoji:componentEmoji(em.hours,'⏱️')
+      },
+      {
+        label:labelText(x,'overtime','Hora extra'),
+        value:'OVERTIME',
+        description:'Consultar/liberar hora extra após a confirmação',
+        emoji:componentEmoji(em.overtime,'➕')
+      },
+      {
+        label:labelText(x,'history','Meu histórico'),
+        value:'HISTORY',
+        description:'Últimos registros por data',
+        emoji:componentEmoji(em.history,'📅')
+      },
+      {
+        label:labelText(x,'rules','Regras do ponto'),
+        value:'RULES',
+        description:'Consultar as regras do bate-ponto',
+        emoji:componentEmoji(em.rules,'📖')
+      }
+    );
+
+  const embed=new EmbedBuilder()
+    .setColor(templateColor(x.color));
+
+  applyTemplateVisual(
+    embed,
+    x,
+    {}
   );
-  const embed=new EmbedBuilder().setColor(templateColor(x.color)).setTitle(x.title||'📋 Central de Serviço').setDescription(x.description||'Controle seu turno pelo menu abaixo. O site e o Discord usam o mesmo registro de ponto.').addFields({name:'🔔 Confirmação',value:'A cada 1 hora, exclusivamente no privado do bot.',inline:true},{name:'⚠️ Divergentes',value:'Tempo acumulado enquanto uma confirmação estiver pendente.',inline:true}).setFooter({text:x.footer||'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp();
-  if(x.image_url)embed.setImage(String(x.image_url));else embed.setImage(`${SITE_URL.replace(/\/$/,'')}/v13/reduto-online.png`);if(x.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
-  return {embeds:[embed],components:[new ActionRowBuilder().addComponents(menu)]};
+
+  if(!x.title){
+    embed.setTitle(
+      `${emojiText(x,'panel','📋')} Central de Serviço`
+    );
+  }
+
+  if(!x.description){
+    embed.setDescription(
+      'Controle seu turno pelo menu abaixo. O site e o Discord usam o mesmo registro de ponto.'
+    );
+  }
+
+  embed.addFields(
+    {
+      name:`${emojiText(x,'pending','🔔')} Confirmação`,
+      value:String(
+        x.field_overrides?.confirmation||
+        'A cada 1 hora, exclusivamente no privado do bot.'
+      ),
+      inline:true
+    },
+    {
+      name:`${emojiText(x,'divergent','⚠️')} Divergentes`,
+      value:String(
+        x.field_overrides?.divergent||
+        'Tempo acumulado enquanto uma confirmação estiver pendente.'
+      ),
+      inline:true
+    }
+  ).setTimestamp();
+
+  return {
+    embeds:[embed],
+    components:[
+      new ActionRowBuilder().addComponents(menu)
+    ]
+  };
 }
 function fmtDuration(sec){sec=Math.max(0,Number(sec||0));return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`}
 async function handleAttendanceMenu(i,value){
   await i.deferReply({ephemeral:true});
+
   try{
-    if(value==='RULES'){const embed=new EmbedBuilder().setColor(0x0B4E7A).setTitle('📖 Regras do Bate-Ponto').setDescription('• Abra o ponto somente em patrulhamento, operação policial ou atividade operacional autorizada.\n• Encerre o turno ao finalizar a atividade.\n• A confirmação é enviada no Discord a cada 1h.\n• Sem confirmação, o tempo adicional vira **hora divergente**.\n• Hora extra começa somente após a confirmação que autoriza continuar.\n• Manter ponto aberto sem atividade pode levar à desconsideração das horas.').setFooter({text:'Centro de Gestão • V13'});await i.editReply({embeds:[embed]});return}
-    if(value==='HISTORY'){const r=await api(`/api/discord/attendance-history?discord_id=${i.user.id}`);const j=await r.json();if(!r.ok||!j.ok){await i.editReply(j.error||'Não foi possível consultar.');return}const c=await botConfig();const x=tpl(c,'attendance_panel');const em=x.option_emojis||{};const lines=(j.rows||[]).slice(0,10).map(row=>`**${new Date(row.local_day).toLocaleDateString('pt-BR')}** • ${String(em.normal||'✅')} ${fmtDuration(row.normal)} • ${String(em.overtime||'➕')} ${fmtDuration(row.overtime)} • ${String(em.divergent||'⚠️')} ${fmtDuration(row.divergent)}`);const embed=new EmbedBuilder().setColor(0x0B4E7A).setTitle(`📅 Histórico • ${j.member}`).setDescription(lines.length?lines.join('\n'):'Nenhum turno registrado.').setFooter({text:'Normal • Extra • Divergente'});await i.editReply({embeds:[embed]});return}
-    const r=await api('/api/discord/attendance-action',{method:'POST',body:JSON.stringify({discord_id:i.user.id,action:value})});const j=await r.json();if(value==='STATUS'&&r.ok&&j.ok){const c=await botConfig();const x=tpl(c,'attendance_panel');const em=x.option_emojis||{};const embed=new EmbedBuilder().setColor(j.active?0x178B61:0x415A66).setTitle(`${String(em.hours||'⏱️')} ${j.member}`).setDescription(j.active?`${String(em.start||'🟢')} **EM SERVIÇO**`:`${String(em.stop||'⚪')} **FORA DE SERVIÇO**`).addFields({name:`${String(em.normal||'✅')} Normal`,value:fmtDuration(j.normal),inline:true},{name:`${String(em.overtime||'➕')} Extra`,value:fmtDuration(j.overtime),inline:true},{name:`${String(em.divergent||'⚠️')} Divergente`,value:fmtDuration(j.divergent),inline:true},{name:'Confirmação',value:j.pending_confirmation?`${String(em.pending||'🟡')} Pendente no privado`:'Sem pendência',inline:false}).setFooter({text:'Dados em tempo real do Centro de Gestão'});await i.editReply({embeds:[embed]});return}
-    await i.editReply(j.message||j.error||(r.ok?'Operação concluída.':'Não foi possível concluir.'));
-  }catch(e){await i.editReply(`Falha ao acessar o ponto: ${e.message}`)}
+    const c=await botConfig();
+
+    if(value==='RULES'){
+      const x=tpl(c,'attendance_rules');
+      const embed=new EmbedBuilder()
+        .setColor(templateColor(x.color));
+
+      applyTemplateVisual(embed,x,{});
+
+      if(!x.title){
+        embed.setTitle(
+          `${emojiText(x,'rules','📖')} Regras do Bate-Ponto`
+        );
+      }
+
+      if(!x.description){
+        embed.setDescription(
+          '• Abra o ponto somente em patrulhamento, operação policial ou atividade operacional autorizada.\n'+
+          '• Encerre o turno ao finalizar a atividade.\n'+
+          '• A confirmação é enviada no Discord a cada 1h.\n'+
+          '• Sem confirmação, o tempo adicional vira **hora divergente**.\n'+
+          '• Hora extra começa somente após a confirmação que autoriza continuar.'
+        );
+      }
+
+      await i.editReply({embeds:[embed]});
+      return;
+    }
+
+    if(value==='HISTORY'){
+      const r=await api(
+        `/api/discord/attendance-history?discord_id=${i.user.id}`
+      );
+
+      const j=await r.json();
+
+      if(!r.ok||!j.ok){
+        await i.editReply(
+          configuredMessage(
+            c,
+            'command_error',
+            '❌ {message}',
+            {
+              message:
+                j.error||
+                'Não foi possível consultar.'
+            }
+          )
+        );
+        return;
+      }
+
+      const x=tpl(c,'attendance_history');
+      const em=x.option_emojis||{};
+
+      const lines=(j.rows||[])
+        .slice(0,10)
+        .map(row=>
+          `**${new Date(row.local_day).toLocaleDateString('pt-BR')}** • `+
+          `${String(em.normal||'✅')} ${fmtDuration(row.normal)} • `+
+          `${String(em.overtime||'➕')} ${fmtDuration(row.overtime)} • `+
+          `${String(em.divergent||'⚠️')} ${fmtDuration(row.divergent)}`
+        );
+
+      const embed=new EmbedBuilder()
+        .setColor(templateColor(x.color));
+
+      applyTemplateVisual(
+        embed,
+        x,
+        {
+          member:j.member,
+          history_lines:
+            lines.length
+              ? lines.join('\n')
+              : 'Nenhum turno registrado.'
+        }
+      );
+
+      if(!x.title){
+        embed.setTitle(
+          `${emojiText(x,'history','📅')} Histórico • ${j.member}`
+        );
+      }
+
+      if(!x.description){
+        embed.setDescription(
+          lines.length
+            ? lines.join('\n')
+            : 'Nenhum turno registrado.'
+        );
+      }
+
+      await i.editReply({embeds:[embed]});
+      return;
+    }
+
+    const r=await api(
+      '/api/discord/attendance-action',
+      {
+        method:'POST',
+        body:JSON.stringify({
+          discord_id:i.user.id,
+          action:value
+        })
+      }
+    );
+
+    const j=await r.json();
+
+    if(value==='STATUS'&&r.ok&&j.ok){
+      const x=tpl(c,'attendance_status');
+      const em=x.option_emojis||{};
+
+      const statusText=
+        j.active
+          ? `${String(em.online||'🟢')} **EM SERVIÇO**`
+          : `${String(em.offline||'⚪')} **FORA DE SERVIÇO**`;
+
+      const embed=new EmbedBuilder()
+        .setColor(
+          templateColor(
+            x.color,
+            j.active?0x178B61:0x415A66
+          )
+        );
+
+      applyTemplateVisual(
+        embed,
+        x,
+        {
+          member:j.member,
+          status_text:statusText
+        }
+      );
+
+      if(!x.title){
+        embed.setTitle(
+          `${String(em.hours||'⏱️')} ${j.member}`
+        );
+      }
+
+      if(!x.description){
+        embed.setDescription(statusText);
+      }
+
+      embed.addFields(
+        {
+          name:`${String(em.normal||'✅')} Normal`,
+          value:fmtDuration(j.normal),
+          inline:true
+        },
+        {
+          name:`${String(em.overtime||'➕')} Extra`,
+          value:fmtDuration(j.overtime),
+          inline:true
+        },
+        {
+          name:`${String(em.divergent||'⚠️')} Divergente`,
+          value:fmtDuration(j.divergent),
+          inline:true
+        },
+        {
+          name:'Confirmação',
+          value:
+            j.pending_confirmation
+              ? `${String(em.pending||'🟡')} Pendente no privado`
+              : 'Sem pendência',
+          inline:false
+        }
+      );
+
+      await i.editReply({embeds:[embed]});
+      return;
+    }
+
+    const message=
+      j.message||
+      j.error||
+      (
+        r.ok
+          ? 'Operação concluída.'
+          : 'Não foi possível concluir.'
+      );
+
+    await i.editReply(
+      configuredMessage(
+        c,
+        r.ok&&j.ok
+          ? 'command_success'
+          : 'command_error',
+        r.ok&&j.ok
+          ? '✅ {message}'
+          : '❌ {message}',
+        {message}
+      )
+    );
+  }catch(e){
+    const c=await botConfig();
+
+    await i.editReply(
+      configuredMessage(
+        c,
+        'command_error',
+        '❌ Falha ao acessar o ponto: {message}',
+        {message:e.message}
+      )
+    );
+  }
 }
 async function registerCommands(){
   const commands=[
@@ -282,17 +1254,420 @@ async function registerCommands(){
 }
 client.on('interactionCreate',async i=>{
   if(i.isStringSelectMenu()&&i.customId==='attendance-menu'){await handleAttendanceMenu(i,String(i.values[0]||'STATUS'));return}
-  if(i.isStringSelectMenu()&&i.customId.startsWith('attendance-confirm:')){const challengeId=i.customId.slice('attendance-confirm:'.length);const decision=String(i.values[0]||'END');await i.deferReply({ephemeral:true});try{const r=await api('/api/discord/attendance-confirm',{method:'POST',body:JSON.stringify({discord_id:i.user.id,challenge_id:challengeId,decision})});const j=await r.json();await i.editReply(r.ok&&j.ok?(decision==='OVERTIME'?'➕ Confirmado. Você continua em serviço; a próxima confirmação será em 1 hora. A divergência acumulada foi preservada.':'✅ Serviço encerrado.'):j.error||'Não foi possível confirmar.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
-  if(i.isButton()&&i.customId.startsWith('password-reset:')){await i.deferReply({ephemeral:true});try{const parts=i.customId.split(':');const requestId=parts[1]||'';const token=parts.slice(2).join(':');const r=await api('/api/discord/password-reset-confirm',{method:'POST',body:JSON.stringify({request_id:requestId,token,discord_id:i.user.id})});const j=await r.json();await i.editReply(j.ok?'✅ Sua senha foi atualizada. Todas as sessões antigas do site foram encerradas.':'❌ Não foi possível alterar: '+(j.error||'confirmação inválida.'))}catch{await i.editReply('❌ Não foi possível concluir a recuperação agora.')}return}
+  if(i.isStringSelectMenu()&&i.customId.startsWith('attendance-confirm:')){
+    const challengeId=i.customId.slice('attendance-confirm:'.length);
+    const decision=String(i.values[0]||'END');
+    await i.deferReply({ephemeral:true});
+    try{
+      const c=await botConfig();
+      const r=await api('/api/discord/attendance-confirm',{
+        method:'POST',
+        body:JSON.stringify({
+          discord_id:i.user.id,
+          challenge_id:challengeId,
+          decision
+        })
+      });
+      const j=await r.json();
+      const message=r.ok&&j.ok
+        ? (
+            decision==='OVERTIME'
+              ? 'Confirmado. Você continua em serviço; a próxima confirmação será em 1 hora. A divergência acumulada foi preservada.'
+              : 'Serviço encerrado.'
+          )
+        : (
+            j.error||
+            'Não foi possível confirmar.'
+          );
+      await i.editReply(
+        configuredMessage(
+          c,
+          r.ok&&j.ok?'command_success':'command_error',
+          r.ok&&j.ok?'✅ {message}':'❌ {message}',
+          {message}
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ Falha: {message}',
+          {message:e.message}
+        )
+      );
+    }
+    return;
+  }
+  if(i.isButton()&&i.customId.startsWith('password-reset:')){
+    await i.deferReply({ephemeral:true});
+    try{
+      const c=await botConfig();
+      const parts=i.customId.split(':');
+      const requestId=parts[1]||'';
+      const token=parts.slice(2).join(':');
+      const r=await api('/api/discord/password-reset-confirm',{
+        method:'POST',
+        body:JSON.stringify({
+          request_id:requestId,
+          token,
+          discord_id:i.user.id
+        })
+      });
+      const j=await r.json();
+      const message=j.ok
+        ? 'Sua senha foi atualizada. Todas as sessões antigas do site foram encerradas.'
+        : 'Não foi possível alterar: '+(j.error||'confirmação inválida.');
+      await i.editReply(
+        configuredMessage(
+          c,
+          j.ok?'command_success':'command_error',
+          j.ok?'✅ {message}':'❌ {message}',
+          {message}
+        )
+      );
+    }catch{
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Não foi possível concluir a recuperação agora.'}
+        )
+      );
+    }
+    return;
+  }
   if(!i.isChatInputCommand())return;
-  if(['perfil','verificar'].includes(i.commandName)){await i.deferReply({ephemeral:true});try{const r=await api(`/api/discord/member?discord_id=${i.user.id}`);if(!r.ok){await i.editReply('Seu Discord ID não está vinculado a nenhuma conta aprovada no Centro de Gestão. Use `/registro`.');return}const {member:m}=await r.json();const embed=new EmbedBuilder().setColor(0x1595D3).setAuthor({name:'PMERJ • Centro de Gestão'}).setTitle(`👤 ${m.game_name}`).setDescription('✅ **Discord vinculado ao Centro de Gestão**').addFields({name:'🎖️ Patente',value:m.rank_name||'—',inline:true},{name:'🏢 Divisão',value:m.division||'Sem divisão',inline:true},{name:'✨ EXP',value:String(m.points||0),inline:true},{name:'🛡️ Situação',value:m.inactive_flag?'⚠️ Inativo sinalizado':m.status,inline:true},{name:'🔗 Discord',value:`<@${i.user.id}>`,inline:true}).setFooter({text:'Centro de Gestão • Dados consultados em tempo real'}).setTimestamp();await i.editReply({embeds:[embed]})}catch{await i.editReply('Não foi possível consultar o sistema agora.')}return}
-  if(i.commandName==='registro'){await i.deferReply({ephemeral:true});try{const roleId=await policeRoleId();if(!roleId)throw new Error('O cargo Polícia Militar ainda não foi configurado no Centro de Gestão.');if(!i.member?.roles?.cache?.has?.(roleId))throw new Error('Você não possui o cargo de Polícia Militar necessário para realizar o registro.');const url=await registrationLink(i.user.id);const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Fazer meu registro'));await i.editReply({content:'Seu link é individual e expira em 15 minutos. O Discord ID será preenchido automaticamente.',components:[row]})}catch(e){await i.editReply(`Não foi possível gerar o cadastro: ${e.message}`)}return}
-  if(i.commandName==='centro'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await upsertCenterPanel(i.channelId);await i.editReply('✅ Painel do Centro de Gestão publicado/atualizado neste canal.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
-  if(i.commandName==='portal'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await upsertPublicPanel(i.channelId);await i.editReply('✅ Portal público publicado/atualizado neste canal.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
-  if(i.commandName==='painelponto'){if(!(await guardAdminCommand(i)))return;try{await i.reply(await attendancePanelPayload())}catch(e){if(!i.replied)await i.reply({content:`Falha: ${e.message}`,ephemeral:true})}return}
-  if(i.commandName==='painel'){if(!(await guardAdminCommand(i)))return;const url=`${SITE_URL.replace(/\/$/,'')}/register`;const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Abrir Centro de Gestão'));const embed=new EmbedBuilder().setTitle('Centro de Gestão Interna').setDescription('Acesso e cadastro destinados aos membros autorizados. Para um vínculo automático com seu Discord, use também o comando `/registro`.').setFooter({text:'Registro sujeito à aprovação administrativa'});await i.reply({embeds:[embed],components:[row]});return}
-  if(i.commandName==='auditoria'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await runAudit(i)}catch(e){await i.editReply(`Falha na auditoria: ${e.message}`)}return}
-  if(i.commandName==='sincronizar'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});const target=i.options.getUser('membro',true);try{const r=await api('/api/discord/sync-request',{method:'POST',body:JSON.stringify({discord_id:target.id})});const j=await r.json();await i.editReply(r.ok&&j.ok?`Sincronização de **${j.member}** adicionada à fila.`:`Não foi possível sincronizar: ${j.error||'erro desconhecido'}`)}catch(e){await i.editReply(`Não foi possível sincronizar: ${e.message}`)}return}
+  if(['perfil','verificar'].includes(i.commandName)){
+    await i.deferReply({ephemeral:true});
+    try{
+      const c=await botConfig();
+      const r=await api(`/api/discord/member?discord_id=${i.user.id}`);
+
+      if(!r.ok){
+        await i.editReply(
+          configuredMessage(
+            c,
+            'command_error',
+            '❌ {message}',
+            {
+              message:'Seu Discord ID não está vinculado a nenhuma conta aprovada no Centro de Gestão. Use /registro.'
+            }
+          )
+        );
+        return;
+      }
+
+      const {member:m}=await r.json();
+      const x=tpl(c,'member_profile');
+      const em=x.option_emojis||{};
+
+      const embed=new EmbedBuilder()
+        .setColor(templateColor(x.color,0x1595D3))
+        .setAuthor({
+          name:'PMERJ • Centro de Gestão'
+        });
+
+      applyTemplateVisual(
+        embed,
+        x,
+        {
+          member:m.game_name,
+          rank:m.rank_name||'—',
+          division:m.division||'Sem divisão',
+          xp:String(m.points||0),
+          status:m.status
+        }
+      );
+
+      if(!x.title){
+        embed.setTitle(
+          `${String(em.profile||'👤')} ${m.game_name}`
+        );
+      }
+
+      if(!x.description){
+        embed.setDescription(
+          `${String(em.link||'✅')} **Discord vinculado ao Centro de Gestão**`
+        );
+      }
+
+      embed.addFields(
+        {
+          name:`${String(em.rank||'🎖️')} Patente`,
+          value:m.rank_name||'—',
+          inline:true
+        },
+        {
+          name:`${String(em.division||'🏢')} Divisão`,
+          value:m.division||'Sem divisão',
+          inline:true
+        },
+        {
+          name:`${String(em.xp||'✨')} EXP`,
+          value:String(m.points||0),
+          inline:true
+        },
+        {
+          name:`${String(em.status||'🛡️')} Situação`,
+          value:
+            m.inactive_flag
+              ? `${String(em.inactive||'⚠️')} Inativo sinalizado`
+              : m.status,
+          inline:true
+        },
+        {
+          name:`${String(em.discord||'🔗')} Discord`,
+          value:`<@${i.user.id}>`,
+          inline:true
+        }
+      ).setTimestamp();
+
+      await i.editReply({embeds:[embed]});
+    }catch{
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Não foi possível consultar o sistema agora.'}
+        )
+      );
+    }
+    return;
+  }
+  if(i.commandName==='registro'){
+    await i.deferReply({ephemeral:true});
+
+    try{
+      const c=await botConfig();
+      const x=tpl(c,'registration_link');
+      const roleId=await policeRoleId();
+
+      if(!roleId){
+        throw new Error(
+          'O cargo Polícia Militar ainda não foi configurado no Centro de Gestão.'
+        );
+      }
+
+      if(!i.member?.roles?.cache?.has?.(roleId)){
+        throw new Error(
+          'Você não possui o cargo de Polícia Militar necessário para realizar o registro.'
+        );
+      }
+
+      const url=await registrationLink(i.user.id);
+
+      const row=new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setStyle(ButtonStyle.Link)
+          .setURL(url)
+          .setLabel(
+            labelText(
+              x,
+              'button',
+              'Fazer meu registro'
+            )
+          )
+      );
+
+      await i.editReply({
+        content:configuredMessage(
+          c,
+          'registration_link',
+          '🔗 Seu link é individual e expira em 15 minutos. O Discord ID será preenchido automaticamente.'
+        ),
+        components:[row]
+      });
+    }catch(e){
+      const c=await botConfig();
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ Não foi possível gerar o cadastro: {message}',
+          {message:e.message}
+        )
+      );
+    }
+
+    return;
+  }
+  if(i.commandName==='centro'){
+    if(!(await guardAdminCommand(i)))return;
+    await i.deferReply({ephemeral:true});
+    try{
+      const c=await botConfig();
+      await upsertCenterPanel(i.channelId);
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_success',
+          '✅ {message}',
+          {message:'Painel do Centro de Gestão publicado/atualizado neste canal.'}
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Falha: '+e.message}
+        )
+      );
+    }
+    return;
+  }
+  if(i.commandName==='portal'){
+    if(!(await guardAdminCommand(i)))return;
+    await i.deferReply({ephemeral:true});
+    try{
+      const c=await botConfig();
+      await upsertPublicPanel(i.channelId);
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_success',
+          '✅ {message}',
+          {message:'Portal público publicado/atualizado neste canal.'}
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Falha: '+e.message}
+        )
+      );
+    }
+    return;
+  }
+  if(i.commandName==='painelponto'){
+    if(!(await guardAdminCommand(i)))return;
+    try{
+      await i.reply(await attendancePanelPayload());
+    }catch(e){
+      if(!i.replied){
+        const c=await botConfig();
+        await i.reply({
+          content:configuredMessage(
+            c,
+            'command_error',
+            '❌ {message}',
+            {message:'Falha: '+e.message}
+          ),
+          ephemeral:true
+        });
+      }
+    }
+    return;
+  }
+  if(i.commandName==='painel'){
+    if(!(await guardAdminCommand(i)))return;
+
+    const c=await botConfig();
+    const x=tpl(c,'registration_panel');
+    const url=`${SITE_URL.replace(/\/$/,'')}/register`;
+
+    const row=new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setURL(url)
+        .setLabel(
+          labelText(
+            x,
+            'button',
+            'Abrir Centro de Gestão'
+          )
+        )
+    );
+
+    const embed=new EmbedBuilder()
+      .setColor(templateColor(x.color,0x0B4E7A));
+
+    applyTemplateVisual(embed,x,{});
+
+    if(!x.title){
+      embed.setTitle('Centro de Gestão Interna');
+    }
+
+    if(!x.description){
+      embed.setDescription(
+        'Acesso e cadastro destinados aos membros autorizados. Para um vínculo automático com seu Discord, use também o comando /registro.'
+      );
+    }
+
+    await i.reply({
+      embeds:[embed],
+      components:[row]
+    });
+
+    return;
+  }
+  if(i.commandName==='auditoria'){
+    if(!(await guardAdminCommand(i)))return;
+    await i.deferReply({ephemeral:true});
+    try{
+      await runAudit(i);
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Falha na auditoria: '+e.message}
+        )
+      );
+    }
+    return;
+  }
+  if(i.commandName==='sincronizar'){
+    if(!(await guardAdminCommand(i)))return;
+    await i.deferReply({ephemeral:true});
+    const target=i.options.getUser('membro',true);
+    try{
+      const c=await botConfig();
+      const r=await api('/api/discord/sync-request',{
+        method:'POST',
+        body:JSON.stringify({discord_id:target.id})
+      });
+      const j=await r.json();
+      const ok=r.ok&&j.ok;
+      const message=ok
+        ? `Sincronização de **${j.member}** adicionada à fila.`
+        : `Não foi possível sincronizar: ${j.error||'erro desconhecido'}`;
+      await i.editReply(
+        configuredMessage(
+          c,
+          ok?'command_success':'command_error',
+          ok?'✅ {message}':'❌ {message}',
+          {message}
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {message:'Não foi possível sincronizar: '+e.message}
+        )
+      );
+    }
+    return;
+  }
 });
 
 let rankMapCache={rows:[],at:0};
@@ -315,7 +1690,17 @@ client.on('guildMemberUpdate',async(oldMember,newMember)=>{
     if(present.length>1||present.some(r=>String(r.rank)!==siteRank)){
       for(const r of rankMap){const id=String(r.role_id);try{await applyRole(newMember,id,allowed&&id===String(allowed.role_id)?'add':'remove')}catch{}}
       await syncNickname(newMember,{rank_name:siteRank,game_name:member.game_name,rg:member.rg});
-      await safeDm(newMember,'Foi detectado um cargo de patente incompatível com seu cadastro. A patente correta foi restaurada automaticamente.');
+      {
+        const c=await botConfig();
+        await safeDm(
+          newMember,
+          configuredMessage(
+            c,
+            'rank_guard',
+            '⚠️ Foi detectado um cargo de patente incompatível com seu cadastro. A patente correta foi restaurada automaticamente.'
+          )
+        );
+      }
     }
   }catch(e){console.warn('rank-guard',e.message)}
 });
