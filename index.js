@@ -1,23 +1,33 @@
 import {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder,
-  ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder
+  ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder,
+  StringSelectMenuBuilder
 } from 'discord.js';
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='6.4.3-v12.4.3';
+const VERSION='13.0.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
 
 async function api(path,opts={}){return fetch(`${SITE_URL.replace(/\/$/,'')}${path}`,{...opts,headers:{authorization:`Bearer ${DISCORD_INTERNAL_SECRET}`,'content-type':'application/json',...(opts.headers||{})}})}
 
-let commandRoleCache={id:String(DISCORD_COMMAND_ROLE_ID||''),at:0};
-async function commandRoleId(){
-  if(Date.now()-commandRoleCache.at<60000)return commandRoleCache.id;
-  try{const r=await api('/api/discord/config');if(r.ok){const j=await r.json();commandRoleCache={id:String(j.command_role_id||DISCORD_COMMAND_ROLE_ID||''),at:Date.now()};return commandRoleCache.id}}catch{}
-  commandRoleCache={id:String(DISCORD_COMMAND_ROLE_ID||''),at:Date.now()};return commandRoleCache.id;
+let botConfigCache={value:null,at:0};
+async function botConfig(){
+  if(botConfigCache.value&&Date.now()-botConfigCache.at<60000)return botConfigCache.value;
+  try{
+    const r=await api('/api/discord/config');
+    if(r.ok){const j=await r.json();botConfigCache={value:j,at:Date.now()};return j}
+  }catch{}
+  const fallback={command_role_id:String(DISCORD_COMMAND_ROLE_ID||''),police_role_id:String(DISCORD_POLICE_ROLE_ID||''),templates:{}};
+  botConfigCache={value:fallback,at:Date.now()};return fallback;
 }
+async function commandRoleId(){const c=await botConfig();return String(c.command_role_id||DISCORD_COMMAND_ROLE_ID||'')}
+async function policeRoleId(){const c=await botConfig();return String(c.police_role_id||DISCORD_POLICE_ROLE_ID||'')}
+function templateColor(v,fallback=0x0B4E7A){if(!v)return fallback;const s=String(v).replace('#','');const n=parseInt(s,16);return Number.isFinite(n)?n:fallback}
+function tpl(c,key){return c?.templates?.[key]||{}}
+function componentEmoji(value,fallback){const s=String(value||fallback||'').trim();const m=s.match(/^<(a?):([^:]+):(\d+)>$/);if(m)return {id:m[3],name:m[2],animated:m[1]==='a'};return {name:s||String(fallback||'•')}}
 async function canUseAdminCommand(interaction){
   if(!interaction.inGuild())return false;
   const member=interaction.member;
@@ -76,63 +86,16 @@ async function processItem(item){
   else if(item.kind==='MEMBER_DISMISSED'){for(const roleId of (p.managed_role_ids||[])){try{await applyRole(member,String(roleId),'remove')}catch(e){console.warn('Falha ao remover cargo',roleId,e.message)}}}
   else if(item.kind==='PASSWORD_RESET_APPROVED'){const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`password-reset:${p.request_id}:${p.confirmation_token}`).setLabel('Confirmar nova senha').setStyle(ButtonStyle.Primary));const delivered=await safeDm(member,p.dm_message||'Sua recuperação de senha foi aprovada. Confirme abaixo.',[row]);if(!delivered)throw new Error('Não foi possível enviar a confirmação no privado do membro.');}
   if(item.kind==='ATTENDANCE_CHALLENGE'){
-    const challengeId=String(p.challenge_id||'');
-    if(!challengeId)throw new Error('Confirmação de ponto sem ID');
-
-    const cycle=Math.max(1,Number(p.cycle_no||1));
-
-    const row=new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`presence-end:${challengeId}`)
-        .setLabel('Sair de serviço')
-        .setEmoji('✅')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`presence-overtime:${challengeId}`)
-        .setLabel('Continuar em serviço')
-        .setEmoji('➕')
-        .setStyle(ButtonStyle.Primary)
+    const challengeId=String(p.challenge_id||'');if(!challengeId)throw new Error('Confirmação de ponto sem ID');
+    const c=await botConfig();const x=tpl(c,'attendance_confirm');const em=x.option_emojis||{};
+    const menu=new StringSelectMenuBuilder().setCustomId(`attendance-confirm:${challengeId}`).setPlaceholder('Selecione como deseja prosseguir').addOptions(
+      {label:'Sair de serviço',description:'Confirma o ciclo e encerra o turno',value:'END',emoji:componentEmoji(em.end,'✅')},
+      {label:'Continuar em serviço',description:'Confirma e inicia um novo ciclo de 1 hora',value:'OVERTIME',emoji:componentEmoji(em.continue,'➕')}
     );
-
-    const embed=new EmbedBuilder()
-      .setColor(0xD3A93A)
-      .setTitle(`⏱️ Confirmação de serviço • ciclo ${cycle}`)
-      .setDescription(
-        p.dm_message||
-        'Escolha se deseja sair ou continuar em serviço. Enquanto não responder, o tempo adicional será salvo como divergente.'
-      )
-      .addFields(
-        {
-          name:'✅ Sair de serviço',
-          value:'Confirma o ciclo e encerra o ponto.',
-          inline:true
-        },
-        {
-          name:'➕ Continuar',
-          value:'Confirma o ciclo e inicia uma nova hora de serviço.',
-          inline:true
-        },
-        {
-          name:'⚠️ Sem resposta',
-          value:'O tempo continua contando, mas fica como divergente.',
-          inline:false
-        }
-      )
-      .setFooter({
-        text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'
-      })
-      .setTimestamp();
-
-    try{
-      await member.send({
-        embeds:[embed],
-        components:[row]
-      });
-    }catch{
-      throw new Error(
-        'Não foi possível enviar a confirmação de ponto no privado do membro.'
-      );
-    }
+    const row=new ActionRowBuilder().addComponents(menu);
+    const embed=new EmbedBuilder().setColor(templateColor(x.color,0xD6A931)).setTitle(x.title||`⏱️ Confirmação de Serviço • ${Number(p.cycle_no||1)}h`).setDescription(p.dm_message||x.description||'Você completou mais um ciclo de serviço. Enquanto não responder, o tempo adicional fica como horas divergentes.').addFields({name:'⚠️ Sem resposta',value:'O ponto continua aberto e o tempo adicional fica salvo como divergente.',inline:false}).setFooter({text:x.footer||'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp();
+    if(x.image_url)embed.setImage(String(x.image_url));if(x.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
+    try{await member.send({embeds:[embed],components:[row]})}catch{throw new Error('Não foi possível enviar a confirmação no privado do membro.')}
   }else if(item.kind!=='PASSWORD_RESET_APPROVED'&&(p.dm_message||item.kind==='DM_NOTIFY')) await safeDm(member,`**Centro de Gestão Interna**\n${p.dm_message||p.message||'Você possui uma nova atualização no Centro de Gestão Interna.'}`);
 }
 async function tick(){try{await api('/api/discord/attendance-due',{method:'POST',body:'{}'});const r=await api('/api/discord/queue');if(!r.ok)return;const {items=[]}=await r.json();for(const item of items){try{await processItem(item);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:true})})}catch(e){lastError=String(e.message||e);await api('/api/discord/queue',{method:'POST',body:JSON.stringify({id:item.id,success:false,error:lastError})})}}}catch(e){lastError=String(e.message||e);console.error('poll',lastError)}}
@@ -148,7 +111,7 @@ async function processPosts(){
         const channel=await guild.channels.fetch(channelId);
         if(!channel||!channel.isTextBased())throw new Error('Canal inválido ou não textual');
         const p=item.payload||{};
-        const colors={ACTION:0x1B6FA8,SEIZURE:0x0E8E9D,PUNISHMENT:0xB5394C,DISMISSAL:0x7C2636,PROMOTION:0x198D62,DEMOTION:0xB96B16,COMPLAINT:0x8E5AB5,PUBLIC_COMPLAINT:0x8E5AB5,ATTENDANCE_START:0x168B5C,ATTENDANCE_END:0xB53A45,ATTENDANCE_OVERTIME:0x267BC5};
+        const colors={ACTION:0x1B6FA8,SEIZURE:0x0E8E9D,PUNISHMENT:0xB5394C,DISMISSAL:0x7C2636,PROMOTION:0x198D62,DEMOTION:0xB96B16,COMPLAINT:0x8E5AB5,PUBLIC_COMPLAINT:0x8E5AB5,ATTENDANCE_START:0x178B61,ATTENDANCE_END:0xB53A45,ATTENDANCE_OVERTIME:0x267BC5};
         const icon=item.source_type==='ACTION'?'🚔':item.source_type==='SEIZURE'?'📦':item.source_type==='PUNISHMENT'?'⚠️':item.source_type==='PROMOTION'?'⬆️':item.source_type==='DEMOTION'?'⬇️':item.source_type==='ATTENDANCE_START'?'🟢':item.source_type==='ATTENDANCE_END'?'🔴':item.source_type==='ATTENDANCE_OVERTIME'?'🔵':'🛡️';
         const embed=new EmbedBuilder()
           .setColor(colors[item.source_type]||0x1B6FA8)
@@ -186,97 +149,35 @@ async function processPosts(){
 
 async function updateAttendancePanel(){
   try{
-    const r=await api('/api/discord/attendance-panel');
-    if(!r.ok)return;
-
-    const d=await r.json();
-    if(!d.ok||!d.channel_id)return;
-
+    const r=await api('/api/discord/attendance-panel');if(!r.ok)return;
+    const d=await r.json();if(!d.ok||!d.channel_id)return;
     const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
-    const channel=await guild.channels.fetch(
-      String(d.channel_id)
-    );
-
-    if(!channel||!channel.isTextBased()){
-      throw new Error(
-        'Canal do painel de efetivo inválido.'
-      );
-    }
-
-    const total=Number(d.active_count||0);
-
+    const channel=await guild.channels.fetch(String(d.channel_id));
+    if(!channel||!channel.isTextBased())throw new Error('Canal do painel de ponto inválido ou não textual');
+    const active=Array.isArray(d.active)?d.active:[];
+    const lines=active.slice(0,20).map((x,i)=>{
+      const min=Math.floor(Number(x.credited_seconds||0)/60);
+      const mode=x.mode==='COMPAT'?'☁️ Leve':'🌐 Normal';
+      const bar='▰'.repeat(Math.min(5,Math.floor(min/12)))+'▱'.repeat(Math.max(0,5-Math.min(5,Math.floor(min/12))));
+      return `**${String(i+1).padStart(2,'0')}. ${x.rank_name} ${x.game_name}**\n${bar}  ${min} min • ${mode}${x.division?` • ${x.division}`:''}`;
+    });
     const embed=new EmbedBuilder()
-      .setColor(total>0?0x178B61:0x415A66)
-      .setAuthor({
-        name:'PMERJ • Controle de Serviço',
-        ...(guild.iconURL?.()
-          ? {iconURL:guild.iconURL()}
-          : {})
-      })
-      .setTitle('👮 EFETIVO NA CIDADE')
-      .setDescription(
-        total>0
-          ? `# ${total}\n**policial${total===1?'':'is'} em serviço neste momento**`
-          : '## 0\nNenhum policial está em serviço neste momento.'
-      )
+      .setColor(0x155F8D)
+      .setAuthor({name:'PMERJ • Centro de Gestão',...(guild.iconURL?.()?{iconURL:guild.iconURL()}:{})})
+      .setTitle('🟢 EFETIVO EM SERVIÇO')
+      .setDescription(lines.length?lines.join('\n\n'):'> Nenhum membro está com ponto aberto no momento.')
       .addFields(
-        {
-          name:'Situação',
-          value:total>0
-            ? '🟢 Serviço ativo'
-            : '⚪ Sem efetivo em serviço',
-          inline:true
-        },
-        {
-          name:'Atualização',
-          value:`<t:${Math.floor(Date.now()/1000)}:R>`,
-          inline:true
-        }
+        {name:'👮 Em serviço',value:`**${d.active_count||0}**`,inline:true},
+        {name:'🏛️ Efetivo',value:`**${d.effective||0}**`,inline:true},
+        {name:'⏱️ Meta',value:`**${Math.round(Number(d.daily_seconds||3600)/60)} min**`,inline:true}
       )
-      .setFooter({
-        text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'
-      })
-      .setTimestamp();
-
+      .setFooter({text:'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'})
+      .setTimestamp(new Date());
     let msg=null;
-
-    if(d.message_id){
-      try{
-        msg=await channel.messages.fetch(
-          String(d.message_id)
-        );
-        await msg.edit({embeds:[embed]});
-      }catch{
-        msg=null;
-      }
-    }
-
-    if(!msg){
-      msg=await channel.send({embeds:[embed]});
-    }
-
-    if(
-      String(d.message_id||'')!==
-      String(msg.id)
-    ){
-      await api(
-        '/api/discord/attendance-panel',
-        {
-          method:'POST',
-          body:JSON.stringify({
-            channel_id:String(d.channel_id),
-            message_id:String(msg.id)
-          })
-        }
-      );
-    }
-  }catch(e){
-    lastError=String(e.message||e);
-    console.error(
-      'attendance-panel',
-      lastError
-    );
-  }
+    if(d.message_id){try{msg=await channel.messages.fetch(String(d.message_id));await msg.edit({embeds:[embed]})}catch{msg=null}}
+    if(!msg)msg=await channel.send({embeds:[embed]});
+    if(String(d.message_id||'')!==String(msg.id))await api('/api/discord/attendance-panel',{method:'POST',body:JSON.stringify({channel_id:String(d.channel_id),message_id:String(msg.id)})});
+  }catch(e){lastError=String(e.message||e);console.error('attendance-panel',lastError)}
 }
 
 async function upsertCenterPanel(forceChannel=null){
@@ -336,12 +237,38 @@ async function runAudit(interaction){
   const file=new AttachmentBuilder(Buffer.from(text,'utf8'),{name:`auditoria-pm-${Date.now()}.txt`});
   await interaction.editReply({embeds:[embed],files:[file]});
 }
+
+async function attendancePanelPayload(){
+  const c=await botConfig();const x=tpl(c,'attendance_panel');const em=x.option_emojis||{};
+  const menu=new StringSelectMenuBuilder().setCustomId('attendance-menu').setPlaceholder('Selecione uma opção').addOptions(
+    {label:'Iniciar turno',value:'START',description:'Entrar em serviço',emoji:componentEmoji(em.start,'🟢')},
+    {label:'Encerrar turno',value:'STOP',description:'Sair de serviço',emoji:componentEmoji(em.stop,'🔴')},
+    {label:'Consultar minhas horas',value:'STATUS',description:'Resumo do turno de hoje',emoji:componentEmoji(em.hours,'⏱️')},
+    {label:'Hora extra',value:'OVERTIME',description:'Consultar/liberar hora extra após a confirmação',emoji:componentEmoji(null,'➕')},
+    {label:'Meu histórico',value:'HISTORY',description:'Últimas datas registradas',emoji:componentEmoji(em.history,'📅')},
+    {label:'Regras do ponto',value:'RULES',description:'Quando abrir e como as horas funcionam',emoji:componentEmoji(em.rules,'📖')}
+  );
+  const embed=new EmbedBuilder().setColor(templateColor(x.color)).setTitle(x.title||'📋 Central de Serviço').setDescription(x.description||'Controle seu turno pelo menu abaixo. O site e o Discord usam o mesmo registro de ponto.').addFields({name:'🔔 Confirmação',value:'A cada 1 hora, exclusivamente no privado do bot.',inline:true},{name:'⚠️ Divergentes',value:'Tempo acumulado enquanto uma confirmação estiver pendente.',inline:true}).setFooter({text:x.footer||'Polícia Militar do Estado do Rio de Janeiro - Reduto Online'}).setTimestamp();
+  if(x.image_url)embed.setImage(String(x.image_url));else embed.setImage(`${SITE_URL.replace(/\/$/,'')}/v13/reduto-online.png`);if(x.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
+  return {embeds:[embed],components:[new ActionRowBuilder().addComponents(menu)]};
+}
+function fmtDuration(sec){sec=Math.max(0,Number(sec||0));return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`}
+async function handleAttendanceMenu(i,value){
+  await i.deferReply({ephemeral:true});
+  try{
+    if(value==='RULES'){const embed=new EmbedBuilder().setColor(0x0B4E7A).setTitle('📖 Regras do Bate-Ponto').setDescription('• Abra o ponto somente em patrulhamento, operação policial ou atividade operacional autorizada.\n• Encerre o turno ao finalizar a atividade.\n• A confirmação é enviada no Discord a cada 1h.\n• Sem confirmação, o tempo adicional vira **hora divergente**.\n• Hora extra começa somente após a confirmação que autoriza continuar.\n• Manter ponto aberto sem atividade pode levar à desconsideração das horas.').setFooter({text:'Centro de Gestão • V13'});await i.editReply({embeds:[embed]});return}
+    if(value==='HISTORY'){const r=await api(`/api/discord/attendance-history?discord_id=${i.user.id}`);const j=await r.json();if(!r.ok||!j.ok){await i.editReply(j.error||'Não foi possível consultar.');return}const lines=(j.rows||[]).slice(0,10).map(x=>`**${new Date(x.local_day).toLocaleDateString('pt-BR')}** • ✅ ${fmtDuration(x.normal)} • ➕ ${fmtDuration(x.overtime)} • ⚠️ ${fmtDuration(x.divergent)}`);const embed=new EmbedBuilder().setColor(0x0B4E7A).setTitle(`📅 Histórico • ${j.member}`).setDescription(lines.length?lines.join('\n'):'Nenhum turno registrado.').setFooter({text:'Normal • Extra • Divergente'});await i.editReply({embeds:[embed]});return}
+    const r=await api('/api/discord/attendance-action',{method:'POST',body:JSON.stringify({discord_id:i.user.id,action:value})});const j=await r.json();if(value==='STATUS'&&r.ok&&j.ok){const embed=new EmbedBuilder().setColor(j.active?0x178B61:0x415A66).setTitle(`⏱️ ${j.member}`).setDescription(j.active?'🟢 **EM SERVIÇO**':'⚪ **FORA DE SERVIÇO**').addFields({name:'✅ Normal',value:fmtDuration(j.normal),inline:true},{name:'➕ Extra',value:fmtDuration(j.overtime),inline:true},{name:'⚠️ Divergente',value:fmtDuration(j.divergent),inline:true},{name:'Confirmação',value:j.pending_confirmation?'🟡 Pendente no privado':'Sem pendência',inline:false}).setFooter({text:'Dados em tempo real do Centro de Gestão'});await i.editReply({embeds:[embed]});return}
+    await i.editReply(j.message||j.error||(r.ok?'Operação concluída.':'Não foi possível concluir.'));
+  }catch(e){await i.editReply(`Falha ao acessar o ponto: ${e.message}`)}
+}
 async function registerCommands(){
   const commands=[
     new SlashCommandBuilder().setName('perfil').setDescription('Mostra seu vínculo com o Centro de Gestão'),
     new SlashCommandBuilder().setName('verificar').setDescription('Verifica se seu Discord está cadastrado no sistema'),
     new SlashCommandBuilder().setName('registro').setDescription('Gera seu link seguro de cadastro no Centro de Gestão'),
     new SlashCommandBuilder().setName('painel').setDescription('Publica o painel de registro do Centro de Gestão'),
+    new SlashCommandBuilder().setName('painelponto').setDescription('Publica a Central de Serviço com menu de ponto'),
     new SlashCommandBuilder().setName('centro').setDescription('Publica/atualiza o painel operacional do Centro de Gestão'),
     new SlashCommandBuilder().setName('portal').setDescription('Publica/atualiza o painel público Portal PMERJ'),
     new SlashCommandBuilder().setName('auditoria').setDescription('Compara o efetivo do Discord com as contas do site'),
@@ -350,73 +277,15 @@ async function registerCommands(){
   const rest=new REST({version:'10'}).setToken(DISCORD_BOT_TOKEN);await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID,DISCORD_GUILD_ID),{body:commands});
 }
 client.on('interactionCreate',async i=>{
-  if(i.isButton()&&i.customId.startsWith('presence-end:')){
-    const challengeId=i.customId.slice('presence-end:'.length);
-    await i.deferReply({ephemeral:true});
-
-    try{
-      const r=await api(
-        '/api/discord/attendance-confirm',
-        {
-          method:'POST',
-          body:JSON.stringify({
-            discord_id:i.user.id,
-            challenge_id:challengeId,
-            decision:'END'
-          })
-        }
-      );
-      const j=await r.json();
-
-      await i.editReply(
-        j.ok
-          ? `✅ Você saiu de serviço.\nNormal: ${Math.floor(Number(j.credited_seconds||0)/60)} min • Extra: ${Math.floor(Number(j.overtime_seconds||0)/60)} min • Divergente: ${Math.floor(Number(j.divergent_seconds||0)/60)} min`
-          : 'Não foi possível encerrar: '+(j.error||'erro desconhecido.')
-      );
-    }catch{
-      await i.editReply(
-        'Não foi possível encerrar o ponto agora.'
-      );
-    }
-    return;
-  }
-
-  if(i.isButton()&&i.customId.startsWith('presence-overtime:')){
-    const challengeId=i.customId.slice('presence-overtime:'.length);
-    await i.deferReply({ephemeral:true});
-
-    try{
-      const r=await api(
-        '/api/discord/attendance-confirm',
-        {
-          method:'POST',
-          body:JSON.stringify({
-            discord_id:i.user.id,
-            challenge_id:challengeId,
-            decision:'OVERTIME'
-          })
-        }
-      );
-      const j=await r.json();
-
-      await i.editReply(
-        j.ok
-          ? '➕ Confirmado. Você continua em serviço. A próxima confirmação será em 1 hora. A divergência acumulada antes desta resposta continua salva.'
-          : 'Não foi possível continuar: '+(j.error||'erro desconhecido.')
-      );
-    }catch{
-      await i.editReply(
-        'Não foi possível confirmar a continuidade agora.'
-      );
-    }
-    return;
-  }
+  if(i.isStringSelectMenu()&&i.customId==='attendance-menu'){await handleAttendanceMenu(i,String(i.values[0]||'STATUS'));return}
+  if(i.isStringSelectMenu()&&i.customId.startsWith('attendance-confirm:')){const challengeId=i.customId.slice('attendance-confirm:'.length);const decision=String(i.values[0]||'END');await i.deferReply({ephemeral:true});try{const r=await api('/api/discord/attendance-confirm',{method:'POST',body:JSON.stringify({discord_id:i.user.id,challenge_id:challengeId,decision})});const j=await r.json();await i.editReply(r.ok&&j.ok?(decision==='OVERTIME'?'➕ Confirmado. Você continua em serviço; a próxima confirmação será em 1 hora. A divergência acumulada foi preservada.':'✅ Serviço encerrado.'):j.error||'Não foi possível confirmar.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
   if(i.isButton()&&i.customId.startsWith('password-reset:')){await i.deferReply({ephemeral:true});try{const parts=i.customId.split(':');const requestId=parts[1]||'';const token=parts.slice(2).join(':');const r=await api('/api/discord/password-reset-confirm',{method:'POST',body:JSON.stringify({request_id:requestId,token,discord_id:i.user.id})});const j=await r.json();await i.editReply(j.ok?'✅ Sua senha foi atualizada. Todas as sessões antigas do site foram encerradas.':'❌ Não foi possível alterar: '+(j.error||'confirmação inválida.'))}catch{await i.editReply('❌ Não foi possível concluir a recuperação agora.')}return}
   if(!i.isChatInputCommand())return;
   if(['perfil','verificar'].includes(i.commandName)){await i.deferReply({ephemeral:true});try{const r=await api(`/api/discord/member?discord_id=${i.user.id}`);if(!r.ok){await i.editReply('Seu Discord ID não está vinculado a nenhuma conta aprovada no Centro de Gestão. Use `/registro`.');return}const {member:m}=await r.json();const embed=new EmbedBuilder().setColor(0x1595D3).setAuthor({name:'PMERJ • Centro de Gestão'}).setTitle(`👤 ${m.game_name}`).setDescription('✅ **Discord vinculado ao Centro de Gestão**').addFields({name:'🎖️ Patente',value:m.rank_name||'—',inline:true},{name:'🏢 Divisão',value:m.division||'Sem divisão',inline:true},{name:'✨ EXP',value:String(m.points||0),inline:true},{name:'🛡️ Situação',value:m.inactive_flag?'⚠️ Inativo sinalizado':m.status,inline:true},{name:'🔗 Discord',value:`<@${i.user.id}>`,inline:true}).setFooter({text:'Centro de Gestão • Dados consultados em tempo real'}).setTimestamp();await i.editReply({embeds:[embed]})}catch{await i.editReply('Não foi possível consultar o sistema agora.')}return}
-  if(i.commandName==='registro'){await i.deferReply({ephemeral:true});try{const url=await registrationLink(i.user.id);const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Fazer meu registro'));await i.editReply({content:'Seu link é individual e expira em 15 minutos. O Discord ID será preenchido automaticamente.',components:[row]})}catch(e){await i.editReply(`Não foi possível gerar o cadastro: ${e.message}`)}return}
+  if(i.commandName==='registro'){await i.deferReply({ephemeral:true});try{const roleId=await policeRoleId();if(!roleId)throw new Error('O cargo Polícia Militar ainda não foi configurado no Centro de Gestão.');if(!i.member?.roles?.cache?.has?.(roleId))throw new Error('Você não possui o cargo de Polícia Militar necessário para realizar o registro.');const url=await registrationLink(i.user.id);const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Fazer meu registro'));await i.editReply({content:'Seu link é individual e expira em 15 minutos. O Discord ID será preenchido automaticamente.',components:[row]})}catch(e){await i.editReply(`Não foi possível gerar o cadastro: ${e.message}`)}return}
   if(i.commandName==='centro'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await upsertCenterPanel(i.channelId);await i.editReply('✅ Painel do Centro de Gestão publicado/atualizado neste canal.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
   if(i.commandName==='portal'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await upsertPublicPanel(i.channelId);await i.editReply('✅ Portal público publicado/atualizado neste canal.')}catch(e){await i.editReply(`Falha: ${e.message}`)}return}
+  if(i.commandName==='painelponto'){if(!(await guardAdminCommand(i)))return;try{await i.reply(await attendancePanelPayload())}catch(e){if(!i.replied)await i.reply({content:`Falha: ${e.message}`,ephemeral:true})}return}
   if(i.commandName==='painel'){if(!(await guardAdminCommand(i)))return;const url=`${SITE_URL.replace(/\/$/,'')}/register`;const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(url).setLabel('Abrir Centro de Gestão'));const embed=new EmbedBuilder().setTitle('Centro de Gestão Interna').setDescription('Acesso e cadastro destinados aos membros autorizados. Para um vínculo automático com seu Discord, use também o comando `/registro`.').setFooter({text:'Registro sujeito à aprovação administrativa'});await i.reply({embeds:[embed],components:[row]});return}
   if(i.commandName==='auditoria'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});try{await runAudit(i)}catch(e){await i.editReply(`Falha na auditoria: ${e.message}`)}return}
   if(i.commandName==='sincronizar'){if(!(await guardAdminCommand(i)))return;await i.deferReply({ephemeral:true});const target=i.options.getUser('membro',true);try{const r=await api('/api/discord/sync-request',{method:'POST',body:JSON.stringify({discord_id:target.id})});const j=await r.json();await i.editReply(r.ok&&j.ok?`Sincronização de **${j.member}** adicionada à fila.`:`Não foi possível sincronizar: ${j.error||'erro desconhecido'}`)}catch(e){await i.editReply(`Não foi possível sincronizar: ${e.message}`)}return}
