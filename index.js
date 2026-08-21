@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.2.0';
+const VERSION='13.3.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -40,6 +40,144 @@ function emojiText(template,key,fallback=''){
 function labelText(template,key,fallback=''){
   return String(template?.option_labels?.[key]||fallback||'').trim();
 }
+function registrationReviewEmbed(c,app,status='PENDING',reviewer=''){
+  const x=tpl(c,'police_registration_review');
+  const em=x.option_emojis||{};
+  const colors={
+    PENDING:templateColor(x.color,0x0B4E7A),
+    APPROVED:0x178B61,
+    REJECTED:0xB53A45
+  };
+
+  const embed=new EmbedBuilder()
+    .setColor(colors[status]||colors.PENDING);
+
+  applyTemplateVisual(
+    embed,
+    x,
+    {
+      member:app.game_name,
+      rg:app.rg,
+      interviewer:
+        app.interviewer_name||
+        `<@${app.interviewer_discord_id}>`,
+      requester:
+        app.requested_by_name||
+        `<@${app.requested_by_discord_id}>`,
+      status,
+      reviewer
+    }
+  );
+
+  if(!x.title){
+    embed.setTitle(
+      `${String(em.register||'📋')} Análise de Registro Policial`
+    );
+  }
+
+  if(!x.description){
+    embed.setDescription(
+      status==='PENDING'
+        ? 'Um novo registro policial foi enviado para análise.'
+        : status==='APPROVED'
+          ? 'Registro aprovado e acesso criado.'
+          : 'Registro recusado.'
+    );
+  }
+
+  embed.addFields(
+    {
+      name:`${String(em.member||'👮')} Nome policial`,
+      value:String(app.game_name),
+      inline:true
+    },
+    {
+      name:`${String(em.rg||'🪪')} RG`,
+      value:String(app.rg),
+      inline:true
+    },
+    {
+      name:'Discord',
+      value:`<@${app.discord_id}>`,
+      inline:true
+    },
+    {
+      name:`${String(em.interviewer||'🎙️')} Entrevistador`,
+      value:
+        app.interviewer_name
+          ? `${app.interviewer_name} • <@${app.interviewer_discord_id}>`
+          : `<@${app.interviewer_discord_id}>`,
+      inline:false
+    },
+    {
+      name:`${String(em.requester||'🧾')} Registrado por`,
+      value:
+        app.requested_by_name
+          ? `${app.requested_by_name} • <@${app.requested_by_discord_id}>`
+          : `<@${app.requested_by_discord_id}>`,
+      inline:false
+    },
+    {
+      name:'Situação',
+      value:
+        status==='PENDING'
+          ? '🟡 Aguardando análise'
+          : status==='APPROVED'
+            ? `✅ Aprovado${reviewer?` por ${reviewer}`:''}`
+            : `❌ Recusado${reviewer?` por ${reviewer}`:''}`,
+      inline:false
+    }
+  ).setTimestamp();
+
+  return embed;
+}
+
+function registrationDecisionRow(c,applicationId,disabled=false){
+  const x=tpl(c,'police_registration_review');
+  const em=x.option_emojis||{};
+
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(
+        `police-reg-approve:${applicationId}`
+      )
+      .setLabel(
+        labelText(
+          x,
+          'approve',
+          'Aprovar registro'
+        )
+      )
+      .setEmoji(
+        componentEmoji(
+          em.approve,
+          '✅'
+        )
+      )
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId(
+        `police-reg-reject:${applicationId}`
+      )
+      .setLabel(
+        labelText(
+          x,
+          'reject',
+          'Recusar registro'
+        )
+      )
+      .setEmoji(
+        componentEmoji(
+          em.reject,
+          '❌'
+        )
+      )
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(disabled)
+  );
+}
+
 function configuredMessage(c,key,fallback,ctx={}){
   const x=tpl(c,key);
   const base=x.message_content||fallback||'';
@@ -1243,6 +1381,33 @@ async function registerCommands(){
     new SlashCommandBuilder().setName('perfil').setDescription('Mostra seu vínculo com o Centro de Gestão'),
     new SlashCommandBuilder().setName('verificar').setDescription('Verifica se seu Discord está cadastrado no sistema'),
     new SlashCommandBuilder().setName('registro').setDescription('Gera seu link seguro de cadastro no Centro de Gestão'),
+    new SlashCommandBuilder()
+      .setName('registro-policial')
+      .setDescription('Cria um registro policial para análise')
+      .addUserOption(o=>
+        o.setName('membro')
+          .setDescription('Membro que será registrado')
+          .setRequired(true)
+      )
+      .addStringOption(o=>
+        o.setName('nome')
+          .setDescription('Nome policial')
+          .setRequired(true)
+          .setMinLength(3)
+          .setMaxLength(40)
+      )
+      .addStringOption(o=>
+        o.setName('rg')
+          .setDescription('RG policial')
+          .setRequired(true)
+          .setMinLength(2)
+          .setMaxLength(40)
+      )
+      .addUserOption(o=>
+        o.setName('entrevistador')
+          .setDescription('Responsável pela entrevista')
+          .setRequired(true)
+      ),
     new SlashCommandBuilder().setName('painel').setDescription('Publica o painel de registro do Centro de Gestão'),
     new SlashCommandBuilder().setName('painelponto').setDescription('Publica a Central de Serviço com menu de ponto'),
     new SlashCommandBuilder().setName('centro').setDescription('Publica/atualiza o painel operacional do Centro de Gestão'),
@@ -1300,6 +1465,295 @@ client.on('interactionCreate',async i=>{
     }
     return;
   }
+  if(
+    i.isButton()&&
+    (
+      i.customId.startsWith('police-reg-approve:')||
+      i.customId.startsWith('police-reg-reject:')
+    )
+  ){
+    if(!(await guardAdminCommand(i)))return;
+
+    await i.deferReply({ephemeral:true});
+
+    const approve=
+      i.customId.startsWith(
+        'police-reg-approve:'
+      );
+
+    const applicationId=
+      i.customId.split(':')[1]||'';
+
+    try{
+      const c=await botConfig();
+
+      const r=await api(
+        '/api/discord/police-registration/decision',
+        {
+          method:'POST',
+          body:JSON.stringify({
+            application_id:applicationId,
+            decision:
+              approve
+                ? 'APPROVE'
+                : 'REJECT',
+            approver_discord_id:
+              i.user.id
+          })
+        }
+      );
+
+      const j=await r.json();
+
+      if(!r.ok||!j.ok){
+        throw new Error(
+          j.error||
+          'Não foi possível analisar o registro.'
+        );
+      }
+
+      const reviewer=
+        i.user.globalName||
+        i.user.username;
+
+      if(!approve){
+        const app=j.application;
+
+        try{
+          const guild=await client.guilds.fetch(
+            DISCORD_GUILD_ID
+          );
+
+          const member=await guild.members.fetch(
+            String(app.discord_id)
+          );
+
+          const x=tpl(
+            c,
+            'police_registration_rejected_dm'
+          );
+
+          const content=configuredMessage(
+            c,
+            'police_registration_rejected_dm',
+            '❌ Seu registro policial não foi aprovado. {note}',
+            {
+              member:app.game_name,
+              rg:app.rg,
+              note:''
+            }
+          );
+
+          await safeDm(member,content);
+        }catch{}
+
+        await i.message.edit({
+          embeds:[
+            registrationReviewEmbed(
+              c,
+              app,
+              'REJECTED',
+              reviewer
+            )
+          ],
+          components:[
+            registrationDecisionRow(
+              c,
+              applicationId,
+              true
+            )
+          ]
+        });
+
+        await i.editReply(
+          configuredMessage(
+            c,
+            'command_success',
+            '✅ {message}',
+            {
+              message:
+                'Registro recusado.'
+            }
+          )
+        );
+
+        return;
+      }
+
+      const guild=await client.guilds.fetch(
+        DISCORD_GUILD_ID
+      );
+
+      const member=await guild.members.fetch(
+        String(j.user.discord_id)
+      );
+
+      let rolesApplied=true;
+      let roleError='';
+
+      try{
+        const removeIds=
+          Array.isArray(j.remove_rank_role_ids)
+            ? j.remove_rank_role_ids
+            : [];
+
+        for(const roleId of removeIds){
+          if(
+            member.roles.cache.has(
+              String(roleId)
+            )
+          ){
+            await member.roles.remove(
+              String(roleId),
+              'Registro policial aprovado'
+            );
+          }
+        }
+
+        for(const roleId of j.role_ids||[]){
+          if(
+            roleId&&
+            !member.roles.cache.has(
+              String(roleId)
+            )
+          ){
+            await member.roles.add(
+              String(roleId),
+              'Registro policial aprovado'
+            );
+          }
+        }
+
+        const nick=
+          `${j.user.rank_name} `+
+          `${j.user.game_name} - `+
+          `${j.user.rg}`;
+
+        try{
+          await member.setNickname(
+            nick.slice(0,32),
+            'Registro policial aprovado'
+          );
+        }catch{}
+      }catch(e){
+        rolesApplied=false;
+        roleError=String(e.message||e);
+      }
+
+      try{
+        await api(
+          '/api/discord/police-registration/role-result',
+          {
+            method:'POST',
+            body:JSON.stringify({
+              application_id:applicationId,
+              success:rolesApplied,
+              error:roleError
+            })
+          }
+        );
+      }catch{}
+
+      const x=tpl(
+        c,
+        'police_registration_approved_dm'
+      );
+
+      const dmContent=configuredMessage(
+        c,
+        'police_registration_approved_dm',
+        '🔑 **Seu acesso foi criado.**\nRG: `{rg}`\nToken temporário: `{token}`\n\nUse esse token como senha no primeiro acesso. Você será obrigado a criar uma nova senha imediatamente.',
+        {
+          member:j.user.game_name,
+          rg:j.user.rg,
+          token:j.token,
+          rank:j.user.rank_name,
+          expiry_hours:
+            j.token_expiry_hours
+        }
+      );
+
+      const loginButton=
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setURL(
+              `${SITE_URL.replace(/\/$/,'')}/login`
+            )
+            .setLabel(
+              labelText(
+                x,
+                'login',
+                'Abrir Centro de Gestão'
+              )
+            )
+        );
+
+      const delivered=await safeDm(
+        member,
+        dmContent,
+        [loginButton]
+      );
+
+      await i.message.edit({
+        embeds:[
+          registrationReviewEmbed(
+            c,
+            j.application,
+            'APPROVED',
+            reviewer
+          )
+        ],
+        components:[
+          registrationDecisionRow(
+            c,
+            applicationId,
+            true
+          )
+        ]
+      });
+
+      const resultMessage=[
+        `Registro de **${j.user.game_name}** aprovado.`,
+        delivered
+          ? 'Token enviado no privado.'
+          : '⚠️ Não consegui enviar DM ao membro.',
+        rolesApplied
+          ? 'Cargos aplicados.'
+          : `⚠️ Falha ao aplicar cargos: ${roleError}`
+      ].join('\n');
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          rolesApplied&&delivered
+            ? 'command_success'
+            : 'command_error',
+          rolesApplied&&delivered
+            ? '✅ {message}'
+            : '⚠️ {message}',
+          {message:resultMessage}
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {
+            message:
+              'Falha na análise: '+e.message
+          }
+        )
+      );
+    }
+
+    return;
+  }
+
   if(i.isButton()&&i.customId.startsWith('password-reset:')){
     await i.deferReply({ephemeral:true});
     try{
@@ -1440,6 +1894,126 @@ client.on('interactionCreate',async i=>{
     }
     return;
   }
+  if(i.commandName==='registro-policial'){
+    if(!(await guardAdminCommand(i)))return;
+
+    await i.deferReply({ephemeral:true});
+
+    try{
+      const target=i.options.getUser(
+        'membro',
+        true
+      );
+
+      const interviewer=i.options.getUser(
+        'entrevistador',
+        true
+      );
+
+      const gameName=String(
+        i.options.getString('nome',true)
+      ).trim();
+
+      const rg=String(
+        i.options.getString('rg',true)
+      ).trim();
+
+      const r=await api(
+        '/api/discord/police-registration/create',
+        {
+          method:'POST',
+          body:JSON.stringify({
+            discord_id:target.id,
+            game_name:gameName,
+            rg,
+            interviewer_discord_id:
+              interviewer.id,
+            interviewer_name:
+              interviewer.globalName||
+              interviewer.username,
+            requested_by_discord_id:
+              i.user.id,
+            requested_by_name:
+              i.user.globalName||
+              i.user.username
+          })
+        }
+      );
+
+      const j=await r.json();
+
+      if(!r.ok||!j.ok){
+        throw new Error(
+          j.error||
+          'Não foi possível criar o registro.'
+        );
+      }
+
+      const c=await botConfig();
+      const channelId=String(
+        j.settings.analysis_channel_id||''
+      );
+
+      const guild=await client.guilds.fetch(
+        DISCORD_GUILD_ID
+      );
+
+      const channel=await guild.channels.fetch(
+        channelId
+      );
+
+      if(!channel?.isTextBased()){
+        throw new Error(
+          'O canal de análise configurado é inválido.'
+        );
+      }
+
+      const embed=registrationReviewEmbed(
+        c,
+        j.application,
+        'PENDING'
+      );
+
+      const row=registrationDecisionRow(
+        c,
+        j.application.id
+      );
+
+      const msg=await channel.send({
+        embeds:[embed],
+        components:[row]
+      });
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_success',
+          '✅ {message}',
+          {
+            message:
+              `Registro de **${gameName}** enviado para análise em <#${channelId}>.`
+          }
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {
+            message:
+              'Não foi possível criar o registro: '+
+              e.message
+          }
+        )
+      );
+    }
+
+    return;
+  }
+
   if(i.commandName==='registro'){
     await i.deferReply({ephemeral:true});
 
