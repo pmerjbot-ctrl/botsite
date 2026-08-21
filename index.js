@@ -53,6 +53,10 @@ async function processItem(item){
   else if(item.kind==='ACCESS_APPROVED'){await applyRole(member,p.rank_role_id,'add');await applyRole(member,p.division_role_id,'add');await syncNickname(member,p)}
   else if(item.kind==='FULL_SYNC'){const desired=new Set((p.desired_role_ids||[]).map(String));for(const r of (p.managed_role_ids||[])){const id=String(r);try{await applyRole(member,id,desired.has(id)?'add':'remove')}catch(e){console.warn('Cargo',id,e.message)}}await syncNickname(member,p)}
   else if(item.kind==='LOGIN_ROLE_CHECK'){
+    if(p.sync_avatar){
+      const avatarUrl=member.user.displayAvatarURL({extension:'png',size:256});
+      try{await api('/api/discord/avatar-sync',{method:'POST',body:JSON.stringify({user_id:item.user_id,discord_id:member.id,avatar_url:avatarUrl})})}catch(e){console.warn('avatar sync',e.message)}
+    }
     const rankRoles=Array.isArray(p.rank_roles)?p.rank_roles:[];
     const present=rankRoles.filter(r=>member.roles.cache.has(String(r.role_id)));
     const siteRank=String(p.site_rank||'');
