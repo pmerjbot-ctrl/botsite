@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.3.0';
+const VERSION='13.3.1';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -177,6 +177,63 @@ function registrationDecisionRow(c,applicationId,disabled=false){
       .setDisabled(disabled)
   );
 }
+
+function policeRegistrationPanelPayload(c){
+  const x=tpl(c,'police_registration_panel');
+  const em=x.option_emojis||{};
+
+  const embed=new EmbedBuilder()
+    .setColor(templateColor(x.color,0x0B4E7A));
+
+  applyTemplateVisual(embed,x,{});
+
+  if(!x.title){
+    embed.setTitle(
+      `${String(em.register||'📋')} Registro Policial`
+    );
+  }
+
+  if(!x.description){
+    embed.setDescription(
+      'Use o menu abaixo para iniciar seu registro policial.\n\n'+
+      'Tenha em mãos:\n'+
+      `${String(em.name||'👤')} Nome do jogo\n`+
+      `${String(em.rg||'🪪')} RG do jogo\n`+
+      `${String(em.interviewer||'🎙️')} Entrevistador responsável`
+    );
+  }
+
+  const menu=new StringSelectMenuBuilder()
+    .setCustomId('police-registration-menu')
+    .setPlaceholder(
+      labelText(
+        x,
+        'placeholder',
+        'Selecione uma opção'
+      )
+    )
+    .addOptions({
+      label:labelText(
+        x,
+        'start',
+        'Iniciar registro policial'
+      ),
+      value:'START',
+      description:'Abrir formulário de registro',
+      emoji:componentEmoji(
+        em.register,
+        '📋'
+      )
+    });
+
+  return {
+    embeds:[embed],
+    components:[
+      new ActionRowBuilder().addComponents(menu)
+    ]
+  };
+}
+
 
 function configuredMessage(c,key,fallback,ctx={}){
   const x=tpl(c,key);
@@ -1382,32 +1439,8 @@ async function registerCommands(){
     new SlashCommandBuilder().setName('verificar').setDescription('Verifica se seu Discord está cadastrado no sistema'),
     new SlashCommandBuilder().setName('registro').setDescription('Gera seu link seguro de cadastro no Centro de Gestão'),
     new SlashCommandBuilder()
-      .setName('registro-policial')
-      .setDescription('Cria um registro policial para análise')
-      .addUserOption(o=>
-        o.setName('membro')
-          .setDescription('Membro que será registrado')
-          .setRequired(true)
-      )
-      .addStringOption(o=>
-        o.setName('nome')
-          .setDescription('Nome policial')
-          .setRequired(true)
-          .setMinLength(3)
-          .setMaxLength(40)
-      )
-      .addStringOption(o=>
-        o.setName('rg')
-          .setDescription('RG policial')
-          .setRequired(true)
-          .setMinLength(2)
-          .setMaxLength(40)
-      )
-      .addUserOption(o=>
-        o.setName('entrevistador')
-          .setDescription('Responsável pela entrevista')
-          .setRequired(true)
-      ),
+      .setName('painelregistro')
+      .setDescription('Publica/atualiza o painel de registro policial neste canal'),
     new SlashCommandBuilder().setName('painel').setDescription('Publica o painel de registro do Centro de Gestão'),
     new SlashCommandBuilder().setName('painelponto').setDescription('Publica a Central de Serviço com menu de ponto'),
     new SlashCommandBuilder().setName('centro').setDescription('Publica/atualiza o painel operacional do Centro de Gestão'),
@@ -1418,6 +1451,56 @@ async function registerCommands(){
   const rest=new REST({version:'10'}).setToken(DISCORD_BOT_TOKEN);await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID,DISCORD_GUILD_ID),{body:commands});
 }
 client.on('interactionCreate',async i=>{
+  if(
+    i.isStringSelectMenu()&&
+    i.customId==='police-registration-menu'
+  ){
+    const choice=String(i.values[0]||'');
+
+    if(choice!=='START'){
+      return;
+    }
+
+    const modal=new ModalBuilder()
+      .setCustomId('police-registration-modal')
+      .setTitle('Registro Policial');
+
+    const nameInput=new TextInputBuilder()
+      .setCustomId('game_name')
+      .setLabel('Nome do jogo')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMinLength(3)
+      .setMaxLength(40)
+      .setPlaceholder('Ex.: Erick Walker');
+
+    const rgInput=new TextInputBuilder()
+      .setCustomId('rg')
+      .setLabel('RG do jogo')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMinLength(2)
+      .setMaxLength(40)
+      .setPlaceholder('Ex.: 554');
+
+    const interviewerInput=new TextInputBuilder()
+      .setCustomId('interviewer')
+      .setLabel('ID ou @ do entrevistador')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(60)
+      .setPlaceholder('Cole o ID do Discord do entrevistador');
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(nameInput),
+      new ActionRowBuilder().addComponents(rgInput),
+      new ActionRowBuilder().addComponents(interviewerInput)
+    );
+
+    await i.showModal(modal);
+    return;
+  }
+
   if(i.isStringSelectMenu()&&i.customId==='attendance-menu'){await handleAttendanceMenu(i,String(i.values[0]||'STATUS'));return}
   if(i.isStringSelectMenu()&&i.customId.startsWith('attendance-confirm:')){
     const challengeId=i.customId.slice('attendance-confirm:'.length);
@@ -1465,6 +1548,162 @@ client.on('interactionCreate',async i=>{
     }
     return;
   }
+  if(
+    i.isModalSubmit()&&
+    i.customId==='police-registration-modal'
+  ){
+    await i.deferReply({ephemeral:true});
+
+    try{
+      const gameName=String(
+        i.fields.getTextInputValue(
+          'game_name'
+        )||''
+      ).trim();
+
+      const rg=String(
+        i.fields.getTextInputValue(
+          'rg'
+        )||''
+      ).trim();
+
+      const interviewerRaw=String(
+        i.fields.getTextInputValue(
+          'interviewer'
+        )||''
+      ).trim();
+
+      const interviewerId=
+        (
+          interviewerRaw.match(/\d{15,22}/)||
+          []
+        )[0]||'';
+
+      if(!interviewerId){
+        throw new Error(
+          'Informe o ID do Discord do entrevistador.'
+        );
+      }
+
+      const guild=await client.guilds.fetch(
+        DISCORD_GUILD_ID
+      );
+
+      let interviewerMember=null;
+
+      try{
+        interviewerMember=
+          await guild.members.fetch(
+            interviewerId
+          );
+      }catch{}
+
+      if(!interviewerMember){
+        throw new Error(
+          'Não encontrei o entrevistador neste servidor.'
+        );
+      }
+
+      const r=await api(
+        '/api/discord/police-registration/create',
+        {
+          method:'POST',
+          body:JSON.stringify({
+            discord_id:i.user.id,
+            game_name:gameName,
+            rg,
+            interviewer_discord_id:
+              interviewerMember.id,
+            interviewer_name:
+              interviewerMember.displayName||
+              interviewerMember.user.username,
+            requested_by_discord_id:
+              i.user.id,
+            requested_by_name:
+              i.member?.displayName||
+              i.user.globalName||
+              i.user.username
+          })
+        }
+      );
+
+      const j=await r.json();
+
+      if(!r.ok||!j.ok){
+        throw new Error(
+          j.error||
+          'Não foi possível enviar o registro.'
+        );
+      }
+
+      const c=await botConfig();
+
+      const channel=await guild.channels.fetch(
+        String(
+          j.settings.analysis_channel_id||''
+        )
+      );
+
+      if(!channel?.isTextBased()){
+        throw new Error(
+          'O canal de análise configurado é inválido.'
+        );
+      }
+
+      const embed=registrationReviewEmbed(
+        c,
+        j.application,
+        'PENDING'
+      );
+
+      const row=registrationDecisionRow(
+        c,
+        j.application.id
+      );
+
+      const msg=await channel.send({
+        embeds:[embed],
+        components:[row]
+      });
+
+      try{
+        const dbPayload={
+          application_id:j.application.id,
+          source_message_id:msg.id
+        };
+      }catch{}
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          'police_registration_submitted',
+          '✅ Registro enviado para análise. Aguarde a decisão da administração.',
+          {
+            member:gameName,
+            rg
+          }
+        )
+      );
+    }catch(e){
+      const c=await botConfig();
+
+      await i.editReply(
+        configuredMessage(
+          c,
+          'command_error',
+          '❌ {message}',
+          {
+            message:
+              'Não foi possível enviar o registro: '+
+              e.message
+          }
+        )
+      );
+    }
+
+    return;
+  }
+
   if(
     i.isButton()&&
     (
@@ -1894,95 +2133,52 @@ client.on('interactionCreate',async i=>{
     }
     return;
   }
-  if(i.commandName==='registro-policial'){
+  if(i.commandName==='painelregistro'){
     if(!(await guardAdminCommand(i)))return;
 
     await i.deferReply({ephemeral:true});
 
     try{
-      const target=i.options.getUser(
-        'membro',
-        true
-      );
-
-      const interviewer=i.options.getUser(
-        'entrevistador',
-        true
-      );
-
-      const gameName=String(
-        i.options.getString('nome',true)
-      ).trim();
-
-      const rg=String(
-        i.options.getString('rg',true)
-      ).trim();
+      const c=await botConfig();
+      const payload=policeRegistrationPanelPayload(c);
 
       const r=await api(
-        '/api/discord/police-registration/create',
+        '/api/discord/police-registration/panel'
+      );
+
+      const old=await r.json().catch(()=>({}));
+
+      let msg=null;
+
+      if(
+        r.ok&&
+        old.message_id&&
+        old.channel_id===i.channelId
+      ){
+        try{
+          msg=await i.channel.messages.fetch(
+            String(old.message_id)
+          );
+          await msg.edit(payload);
+        }catch{
+          msg=null;
+        }
+      }
+
+      if(!msg){
+        msg=await i.channel.send(payload);
+      }
+
+      await api(
+        '/api/discord/police-registration/panel',
         {
           method:'POST',
           body:JSON.stringify({
-            discord_id:target.id,
-            game_name:gameName,
-            rg,
-            interviewer_discord_id:
-              interviewer.id,
-            interviewer_name:
-              interviewer.globalName||
-              interviewer.username,
-            requested_by_discord_id:
-              i.user.id,
-            requested_by_name:
-              i.user.globalName||
-              i.user.username
+            channel_id:i.channelId,
+            message_id:msg.id
           })
         }
       );
-
-      const j=await r.json();
-
-      if(!r.ok||!j.ok){
-        throw new Error(
-          j.error||
-          'Não foi possível criar o registro.'
-        );
-      }
-
-      const c=await botConfig();
-      const channelId=String(
-        j.settings.analysis_channel_id||''
-      );
-
-      const guild=await client.guilds.fetch(
-        DISCORD_GUILD_ID
-      );
-
-      const channel=await guild.channels.fetch(
-        channelId
-      );
-
-      if(!channel?.isTextBased()){
-        throw new Error(
-          'O canal de análise configurado é inválido.'
-        );
-      }
-
-      const embed=registrationReviewEmbed(
-        c,
-        j.application,
-        'PENDING'
-      );
-
-      const row=registrationDecisionRow(
-        c,
-        j.application.id
-      );
-
-      const msg=await channel.send({
-        embeds:[embed],
-        components:[row]
-      });
 
       await i.editReply(
         configuredMessage(
@@ -1991,7 +2187,7 @@ client.on('interactionCreate',async i=>{
           '✅ {message}',
           {
             message:
-              `Registro de **${gameName}** enviado para análise em <#${channelId}>.`
+              'Painel de registro policial publicado/atualizado neste canal.'
           }
         )
       );
@@ -2004,7 +2200,7 @@ client.on('interactionCreate',async i=>{
           '❌ {message}',
           {
             message:
-              'Não foi possível criar o registro: '+
+              'Não foi possível publicar o painel: '+
               e.message
           }
         )
