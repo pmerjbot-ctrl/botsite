@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.3.2';
+const VERSION='13.3.3';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -103,10 +103,10 @@ function registrationReviewEmbed(c,app,status='PENDING',reviewer=''){
     },
     {
       name:`${String(em.interviewer||'🎙️')} Entrevistador`,
-      value:
-        app.interviewer_name
-          ? `${app.interviewer_name} • <@${app.interviewer_discord_id}>`
-          : `<@${app.interviewer_discord_id}>`,
+      value:String(
+        app.interviewer_name||
+        'Não informado'
+      ),
       inline:false
     },
     {
@@ -1486,11 +1486,12 @@ client.on('interactionCreate',async i=>{
 
       const interviewerInput=new TextInputBuilder()
         .setCustomId('interviewer')
-        .setLabel('ID do entrevistador')
+        .setLabel('Nome do entrevistador')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setMaxLength(22)
-        .setPlaceholder('Cole o ID do Discord do entrevistador');
+        .setMinLength(2)
+        .setMaxLength(100)
+        .setPlaceholder('Ex.: Ten. Almeida');
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(nameInput),
@@ -1585,42 +1586,24 @@ client.on('interactionCreate',async i=>{
         )||''
       ).trim();
 
-      const interviewerRaw=String(
+      const interviewerName=String(
         i.fields.getTextInputValue(
           'interviewer'
         )||''
       ).trim();
 
-      const interviewerId=
-        (
-          interviewerRaw.match(/\d{15,22}/)||
-          []
-        )[0]||'';
-
-      if(!interviewerId){
+      if(
+        interviewerName.length<2||
+        interviewerName.length>100
+      ){
         throw new Error(
-          'Informe o ID do Discord do entrevistador.'
+          'Informe corretamente o nome do entrevistador.'
         );
       }
 
       const guild=await client.guilds.fetch(
         DISCORD_GUILD_ID
       );
-
-      let interviewerMember=null;
-
-      try{
-        interviewerMember=
-          await guild.members.fetch(
-            interviewerId
-          );
-      }catch{}
-
-      if(!interviewerMember){
-        throw new Error(
-          'Não encontrei o entrevistador neste servidor.'
-        );
-      }
 
       const r=await api(
         '/api/discord/police-registration/create',
@@ -1630,11 +1613,9 @@ client.on('interactionCreate',async i=>{
             discord_id:i.user.id,
             game_name:gameName,
             rg,
-            interviewer_discord_id:
-              interviewerMember.id,
+            interviewer_discord_id:null,
             interviewer_name:
-              interviewerMember.displayName||
-              interviewerMember.user.username,
+              interviewerName,
             requested_by_discord_id:
               i.user.id,
             requested_by_name:
