@@ -1,12 +1,12 @@
 import {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder,
   ButtonBuilder, ButtonStyle, ActionRowBuilder, PermissionFlagsBits, AttachmentBuilder,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle
 } from 'discord.js';
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.3.1';
+const VERSION='13.3.2';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -1455,49 +1455,67 @@ client.on('interactionCreate',async i=>{
     i.isStringSelectMenu()&&
     i.customId==='police-registration-menu'
   ){
-    const choice=String(i.values[0]||'');
+    try{
+      const choice=String(i.values[0]||'');
 
-    if(choice!=='START'){
-      return;
+      if(choice!=='START'){
+        return;
+      }
+
+      const modal=new ModalBuilder()
+        .setCustomId('police-registration-modal')
+        .setTitle('Registro Policial');
+
+      const nameInput=new TextInputBuilder()
+        .setCustomId('game_name')
+        .setLabel('Nome do jogo')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(3)
+        .setMaxLength(40)
+        .setPlaceholder('Ex.: Erick Walker');
+
+      const rgInput=new TextInputBuilder()
+        .setCustomId('rg')
+        .setLabel('RG do jogo')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(2)
+        .setMaxLength(40)
+        .setPlaceholder('Ex.: 554');
+
+      const interviewerInput=new TextInputBuilder()
+        .setCustomId('interviewer')
+        .setLabel('ID do entrevistador')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(22)
+        .setPlaceholder('Cole o ID do Discord do entrevistador');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(nameInput),
+        new ActionRowBuilder().addComponents(rgInput),
+        new ActionRowBuilder().addComponents(interviewerInput)
+      );
+
+      await i.showModal(modal);
+    }catch(e){
+      lastError=String(e?.message||e);
+      console.error(
+        'police-registration-modal',
+        e
+      );
+
+      if(!i.replied&&!i.deferred){
+        try{
+          await i.reply({
+            content:'Não foi possível abrir o formulário de registro. Tente novamente.',
+            ephemeral:true
+          });
+        }catch{}
+      }
     }
 
-    const modal=new ModalBuilder()
-      .setCustomId('police-registration-modal')
-      .setTitle('Registro Policial');
-
-    const nameInput=new TextInputBuilder()
-      .setCustomId('game_name')
-      .setLabel('Nome do jogo')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setMinLength(3)
-      .setMaxLength(40)
-      .setPlaceholder('Ex.: Erick Walker');
-
-    const rgInput=new TextInputBuilder()
-      .setCustomId('rg')
-      .setLabel('RG do jogo')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setMinLength(2)
-      .setMaxLength(40)
-      .setPlaceholder('Ex.: 554');
-
-    const interviewerInput=new TextInputBuilder()
-      .setCustomId('interviewer')
-      .setLabel('ID ou @ do entrevistador')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setMaxLength(60)
-      .setPlaceholder('Cole o ID do Discord do entrevistador');
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(nameInput),
-      new ActionRowBuilder().addComponents(rgInput),
-      new ActionRowBuilder().addComponents(interviewerInput)
-    );
-
-    await i.showModal(modal);
     return;
   }
 
@@ -2475,5 +2493,5 @@ client.on('guildMemberUpdate',async(oldMember,newMember)=>{
   }catch(e){console.warn('rank-guard',e.message)}
 });
 
-client.once('ready',async()=>{console.log(`Bot online como ${client.user.tag}`);try{await registerCommands();console.log('Comandos registrados')}catch(e){lastError=String(e.message||e);console.error('commands',lastError)}setInterval(tick,POLL_MS);setInterval(processPosts,POLL_MS);setInterval(heartbeat,15000);setInterval(updateAttendancePanel,20000);setInterval(()=>upsertCenterPanel().catch(e=>console.warn('center-panel',e.message)),30000);setInterval(()=>upsertPublicPanel().catch(e=>console.warn('public-panel',e.message)),300000);tick();processPosts();heartbeat();updateAttendancePanel();upsertCenterPanel().catch(()=>{});upsertPublicPanel().catch(()=>{})});
+client.once('clientReady',async()=>{console.log(`Bot online como ${client.user.tag}`);try{await registerCommands();console.log('Comandos registrados')}catch(e){lastError=String(e.message||e);console.error('commands',lastError)}setInterval(tick,POLL_MS);setInterval(processPosts,POLL_MS);setInterval(heartbeat,15000);setInterval(updateAttendancePanel,20000);setInterval(()=>upsertCenterPanel().catch(e=>console.warn('center-panel',e.message)),30000);setInterval(()=>upsertPublicPanel().catch(e=>console.warn('public-panel',e.message)),300000);tick();processPosts();heartbeat();updateAttendancePanel();upsertCenterPanel().catch(()=>{});upsertPublicPanel().catch(()=>{})});
 client.login(DISCORD_BOT_TOKEN);
