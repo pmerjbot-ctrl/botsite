@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.4.0';
+const VERSION='13.4.2';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -18,6 +18,7 @@ async function botConfig(){
   if(botConfigCache.value&&Date.now()-botConfigCache.at<60000)return botConfigCache.value;
   try{
     const r=await api('/api/discord/config');
+  globalThis.__rankEmojis=r?.rank_emojis||{};
     if(r.ok){const j=await r.json();botConfigCache={value:j,at:Date.now()};return j}
   }catch{}
   const fallback={command_role_id:String(DISCORD_COMMAND_ROLE_ID||''),police_role_id:String(DISCORD_POLICE_ROLE_ID||''),templates:{}};
@@ -28,6 +29,31 @@ async function policeRoleId(){const c=await botConfig();return String(c.police_r
 function templateColor(v,fallback=0x0B4E7A){if(!v)return fallback;const s=String(v).replace('#','');const n=parseInt(s,16);return Number.isFinite(n)?n:fallback}
 function tpl(c,key){return c?.templates?.[key]||{}}
 function componentEmoji(value,fallback){const s=String(value||fallback||'').trim();const m=s.match(/^<(a?):([^:]+):(\d+)>$/);if(m)return {id:m[3],name:m[2],animated:m[1]==='a'};return {name:s||String(fallback||'•')}}
+function normalizeRankName(value){
+  return String(value||'')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .replace(/[‐‑‒–—]/g,'-');
+}
+
+function rankEmojiFor(rank,config){
+  const map=config?.rank_emojis||{};
+  const wanted=normalizeRankName(rank);
+
+  for(const [name,emoji] of Object.entries(map)){
+    if(
+      normalizeRankName(name)===wanted&&
+      /^<a?:[^:>]+:\d{15,22}>$/.test(String(emoji||''))
+    ){
+      return String(emoji);
+    }
+  }
+
+  return '';
+}
+
 function renderTemplate(value,ctx={}){
   return String(value??'').replace(/\{([a-zA-Z0-9_]+)\}/g,(all,key)=>{
     const v=ctx[key];
@@ -490,7 +516,7 @@ async function processPosts(){
           source_type:String(item.source_type||''),
           source_id:String(item.source_id||''),
           xp:String(p.xp_reward||p.amount||0),
-          member:String(p.member||''),rank:String(p.rank||''),amount:String(p.amount??''),reason:String(p.reason||p.description||''),balance:String(p.balance??''),action:String(p.action||''),actor:String(p.actor||''),target:String(p.target||''),details:typeof p.details==='string'?p.details:JSON.stringify(p.details||{})
+          member:String(p.member||''),rank:String(p.rank||''),rank_emoji:rankEmojiFor(p.rank,{rank_emojis:(globalThis.__rankEmojis||{})}),amount:String(p.amount??''),reason:String(p.reason||p.description||''),balance:String(p.balance??''),action:String(p.action||''),actor:String(p.actor||''),target:String(p.target||''),details:typeof p.details==='string'?p.details:JSON.stringify(p.details||{})
         };
 
         const authorEmoji=emojiText(
@@ -527,7 +553,11 @@ async function processPosts(){
                 f.name||
                 'Informação'
               ).slice(0,256),
-              value:String(f.value||'—').slice(0,1024),
+              value:(
+                String(f.name||'').toLowerCase().includes('membro')&&ctx.rank_emoji
+                  ? `${ctx.rank_emoji} ${renderTemplate(String(f.value||'—'),ctx)}`
+                  : renderTemplate(String(f.value||'—'),ctx)
+              ).slice(0,1024),
               inline:!!f.inline
             }));
 
