@@ -6,20 +6,60 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.4.2';
+const VERSION='13.5.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
 
-async function api(path,opts={}){return fetch(`${SITE_URL.replace(/\/$/,'')}${path}`,{...opts,headers:{authorization:`Bearer ${DISCORD_INTERNAL_SECRET}`,'content-type':'application/json',...(opts.headers||{})}})}
+async function api(path,opts={}){
+  return fetch(
+    `${SITE_URL.replace(/\/$/,'')}${path}`,
+    {
+      ...opts,
+      signal:opts.signal||AbortSignal.timeout(8000),
+      headers:{
+        authorization:`Bearer ${DISCORD_INTERNAL_SECRET}`,
+        'content-type':'application/json',
+        ...(opts.headers||{})
+      }
+    }
+  );
+}
+
+async function getGuild(){
+  return (
+    client.guilds.cache.get(DISCORD_GUILD_ID)||
+    await getGuild()
+  );
+}
+
+async function getChannel(guild,id){
+  const key=String(id||'');
+  return (
+    guild.channels.cache.get(key)||
+    await getChannel(guild,key)
+  );
+}
+
+async function getMember(guild,id){
+  const key=String(id||'');
+  return (
+    guild.members.cache.get(key)||
+    await guild.members.fetch(key)
+  );
+}
 
 let botConfigCache={value:null,at:0};
 async function botConfig(){
   if(botConfigCache.value&&Date.now()-botConfigCache.at<60000)return botConfigCache.value;
   try{
     const r=await api('/api/discord/config');
-  globalThis.__rankEmojis=r?.rank_emojis||{};
-    if(r.ok){const j=await r.json();botConfigCache={value:j,at:Date.now()};return j}
+    if(r.ok){
+      const j=await r.json();
+      globalThis.__rankEmojis=j?.rank_emojis||{};
+      botConfigCache={value:j,at:Date.now()};
+      return j;
+    }
   }catch{}
   const fallback={command_role_id:String(DISCORD_COMMAND_ROLE_ID||''),police_role_id:String(DISCORD_POLICE_ROLE_ID||''),templates:{}};
   botConfigCache={value:fallback,at:Date.now()};return fallback;
@@ -298,7 +338,7 @@ function dmTemplateKey(kind){
   };
   return map[String(kind||'')]||'generic_dm';
 }
-async function syncGuildEmojis(){try{const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const es=await guild.emojis.fetch();const items=[...es.values()].sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'pt-BR')).slice(0,250).map(e=>({id:String(e.id),name:String(e.name||'emoji'),animated:!!e.animated,code:`<${e.animated?'a':''}:${e.name}:${e.id}>`}));await api('/api/discord/emoji-catalog',{method:'POST',body:JSON.stringify({items})});return items}catch(e){lastError=String(e?.message||e);console.error('emoji-catalog',lastError);return[]}}
+async function syncGuildEmojis(){try{const guild=await getGuild();const es=await guild.emojis.fetch();const items=[...es.values()].sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'pt-BR')).slice(0,250).map(e=>({id:String(e.id),name:String(e.name||'emoji'),animated:!!e.animated,code:`<${e.animated?'a':''}:${e.name}:${e.id}>`}));await api('/api/discord/emoji-catalog',{method:'POST',body:JSON.stringify({items})});return items}catch(e){lastError=String(e?.message||e);console.error('emoji-catalog',lastError);return[]}}
 
 function postTemplateKey(sourceType){
   const map={
@@ -349,7 +389,7 @@ function nickname(rank,name,rg){const prefix=`${rank||''} `.trimStart();const su
 async function syncNickname(member,p){if(!p.game_name||!p.rg||!p.rank_name)return;const n=nickname(p.rank_name,p.game_name,p.rg);if(member.nickname!==n){try{await member.setNickname(n,'Sincronização Centro de Gestão Interna')}catch(e){console.warn('Falha ao alterar apelido',member.id,e.message)}}}
 async function processItem(item){
   if(!item.discord_id) throw new Error('Usuário sem Discord ID vinculado');
-  const guild=await client.guilds.fetch(DISCORD_GUILD_ID); const member=await guild.members.fetch(item.discord_id); const p=item.payload||{};
+  const guild=await getGuild(); const member=await getMember(guild,item.discord_id); const p=item.payload||{};
   if(item.kind==='RANK_CHANGE'||item.kind==='DIVISION_CHANGE'){await applyRole(member,p.from_role_id,'remove');await applyRole(member,p.discord_role_id,'add');await syncNickname(member,p)}
   else if(item.kind==='ACCESS_APPROVED'){await applyRole(member,p.rank_role_id,'add');await applyRole(member,p.division_role_id,'add');await syncNickname(member,p)}
   else if(item.kind==='FULL_SYNC'){const desired=new Set((p.desired_role_ids||[]).map(String));for(const r of (p.managed_role_ids||[])){const id=String(r);try{await applyRole(member,id,desired.has(id)?'add':'remove')}catch(e){console.warn('Cargo',id,e.message)}}await syncNickname(member,p)}
@@ -476,7 +516,7 @@ async function processPosts(){
           DISCORD_GUILD_ID
         );
 
-        const channel=await guild.channels.fetch(
+        const channel=await getChannel(guild,
           channelId
         );
 
@@ -676,7 +716,7 @@ async function updateAttendancePanel(){
       DISCORD_GUILD_ID
     );
 
-    const channel=await guild.channels.fetch(
+    const channel=await getChannel(guild,
       String(d.channel_id)
     );
 
@@ -827,7 +867,7 @@ async function upsertCenterPanel(forceChannel=null){
     DISCORD_GUILD_ID
   );
 
-  const channel=await guild.channels.fetch(
+  const channel=await getChannel(guild,
     channelId
   );
 
@@ -1013,7 +1053,7 @@ async function upsertPublicPanel(forceChannel=null){
     DISCORD_GUILD_ID
   );
 
-  const channel=await guild.channels.fetch(
+  const channel=await getChannel(guild,
     channelId
   );
 
@@ -1104,7 +1144,7 @@ async function upsertPublicPanel(forceChannel=null){
 async function heartbeat(){try{await api('/api/discord/heartbeat',{method:'POST',body:JSON.stringify({bot_user_id:client.user?.id,bot_tag:client.user?.tag,guild_id:DISCORD_GUILD_ID,version:VERSION,latency_ms:Math.round(client.ws.ping||0),started_at:startedAt,last_error:lastError||null,metadata:{railway:true}})});lastError=''}catch(e){lastError=String(e.message||e)}}
 async function registrationLink(discordId){const r=await api('/api/discord/registration-link',{method:'POST',body:JSON.stringify({discord_id:discordId})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Não foi possível gerar o link');return j.url}
 async function runAudit(interaction){
-  const guild=await client.guilds.fetch(DISCORD_GUILD_ID);
+  const guild=await getGuild();
   await guild.members.fetch();
   const r=await api('/api/discord/audit-data');
   if(!r.ok)throw new Error('API de auditoria indisponível');
@@ -1664,7 +1704,7 @@ client.on('interactionCreate',async i=>{
 
       const c=await botConfig();
 
-      const channel=await guild.channels.fetch(
+      const channel=await getChannel(guild,
         String(
           j.settings.analysis_channel_id||''
         )
@@ -1789,9 +1829,7 @@ client.on('interactionCreate',async i=>{
             DISCORD_GUILD_ID
           );
 
-          const member=await guild.members.fetch(
-            String(app.discord_id)
-          );
+          const member=await getMember(guild,String(app.discord_id));
 
           const x=tpl(
             c,
@@ -1849,9 +1887,7 @@ client.on('interactionCreate',async i=>{
         DISCORD_GUILD_ID
       );
 
-      const member=await guild.members.fetch(
-        String(j.user.discord_id)
-      );
+      const member=await getMember(guild,String(j.user.discord_id));
 
       let rolesApplied=true;
       let roleError='';
