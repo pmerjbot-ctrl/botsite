@@ -6,7 +6,7 @@ import {
 
 const {DISCORD_BOT_TOKEN,DISCORD_GUILD_ID,SITE_URL,DISCORD_INTERNAL_SECRET,DISCORD_CLIENT_ID,DISCORD_POLICE_ROLE_ID,DISCORD_COMMAND_ROLE_ID}=process.env;
 const POLL_MS=Math.max(5000,Number(process.env.POLL_MS||10000));
-const VERSION='13.3.3';
+const VERSION='13.4.0';
 if(!DISCORD_BOT_TOKEN||!DISCORD_GUILD_ID||!SITE_URL||!DISCORD_INTERNAL_SECRET||!DISCORD_CLIENT_ID) throw new Error('Variáveis do bot incompletas');
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers]});
 const startedAt=new Date().toISOString(); let lastError='';
@@ -252,8 +252,10 @@ function applyTemplateVisual(embed,x,ctx={}){
   if(x?.title)embed.setTitle(renderTemplate(x.title,emojiCtx).slice(0,256));
   if(x?.description)embed.setDescription(renderTemplate(x.description,emojiCtx).slice(0,4000));
   if(x?.footer)embed.setFooter({text:renderTemplate(x.footer,emojiCtx).slice(0,2048)});
-  if(x?.image_url)embed.setImage(String(x.image_url));
-  if(x?.thumbnail_url)embed.setThumbnail(String(x.thumbnail_url));
+  if(x?.author_name){const a={name:renderTemplate(x.author_name,emojiCtx).slice(0,256)};if(x.author_icon_url&&/^https?:\/\//i.test(String(x.author_icon_url)))a.iconURL=String(x.author_icon_url);embed.setAuthor(a)}
+  if(x?.image_url)embed.setImage(renderTemplate(String(x.image_url),emojiCtx));
+  if(x?.thumbnail_url)embed.setThumbnail(renderTemplate(String(x.thumbnail_url),emojiCtx));
+  if(x?.timestamp_enabled!==false)embed.setTimestamp();
   return embed;
 }
 function dmTemplateKey(kind){
@@ -270,6 +272,8 @@ function dmTemplateKey(kind){
   };
   return map[String(kind||'')]||'generic_dm';
 }
+async function syncGuildEmojis(){try{const guild=await client.guilds.fetch(DISCORD_GUILD_ID);const es=await guild.emojis.fetch();const items=[...es.values()].sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'pt-BR')).slice(0,250).map(e=>({id:String(e.id),name:String(e.name||'emoji'),animated:!!e.animated,code:`<${e.animated?'a':''}:${e.name}:${e.id}>`}));await api('/api/discord/emoji-catalog',{method:'POST',body:JSON.stringify({items})});return items}catch(e){lastError=String(e?.message||e);console.error('emoji-catalog',lastError);return[]}}
+
 function postTemplateKey(sourceType){
   const map={
     ACTION:'action_post',
@@ -283,7 +287,9 @@ function postTemplateKey(sourceType){
     PUBLIC_COMPLAINT:'complaint_post',
     ATTENDANCE_START:'attendance_start',
     ATTENDANCE_OVERTIME:'attendance_overtime',
-    ATTENDANCE_END:'attendance_end'
+    ATTENDANCE_END:'attendance_end',
+    XP_LOG:'xp_log_post',
+    AUDIT_LOG:'audit_log_post'
   };
   return map[String(sourceType||'')]||'action_post';
 }
@@ -483,7 +489,8 @@ async function processPosts(){
           ),
           source_type:String(item.source_type||''),
           source_id:String(item.source_id||''),
-          xp:String(p.xp_reward||0)
+          xp:String(p.xp_reward||p.amount||0),
+          member:String(p.member||''),rank:String(p.rank||''),amount:String(p.amount??''),reason:String(p.reason||p.description||''),balance:String(p.balance??''),action:String(p.action||''),actor:String(p.actor||''),target:String(p.target||''),details:typeof p.details==='string'?p.details:JSON.stringify(p.details||{})
         };
 
         const authorEmoji=emojiText(
@@ -492,19 +499,8 @@ async function processPosts(){
           '🛡️'
         );
 
-        const embed=new EmbedBuilder()
-          .setColor(
-            templateColor(
-              x.color,
-              fallbackColors[item.source_type]||0x1B6FA8
-            )
-          )
-          .setAuthor({
-            name:`${authorEmoji} PMERJ • Centro de Gestão`,
-            ...(guild.iconURL?.()
-              ? {iconURL:guild.iconURL()}
-              : {})
-          });
+        const embed=new EmbedBuilder().setColor(templateColor(x.color,fallbackColors[item.source_type]||0x1B6FA8));
+        if(!x.author_name)embed.setAuthor({name:`${authorEmoji} PMERJ • Centro de Gestão`,...(guild.iconURL?.()?{iconURL:guild.iconURL()}: {})});
 
         applyTemplateVisual(
           embed,
@@ -1443,6 +1439,7 @@ async function registerCommands(){
       .setDescription('Publica/atualiza o painel de registro policial neste canal'),
     new SlashCommandBuilder().setName('painel').setDescription('Publica o painel de registro do Centro de Gestão'),
     new SlashCommandBuilder().setName('painelponto').setDescription('Publica a Central de Serviço com menu de ponto'),
+    new SlashCommandBuilder().setName('emojis').setDescription('Mostra os códigos dos emojis personalizados do servidor'),
     new SlashCommandBuilder().setName('centro').setDescription('Publica/atualiza o painel operacional do Centro de Gestão'),
     new SlashCommandBuilder().setName('portal').setDescription('Publica/atualiza o painel público Portal PMERJ'),
     new SlashCommandBuilder().setName('auditoria').setDescription('Compara o efetivo do Discord com as contas do site'),
@@ -2132,6 +2129,8 @@ client.on('interactionCreate',async i=>{
     }
     return;
   }
+  if(i.commandName==='emojis'){await i.deferReply({ephemeral:true});try{const items=await syncGuildEmojis();if(!items.length){await i.editReply('Nenhum emoji personalizado encontrado.');return}const lines=items.slice(0,50).map((e,n)=>`${String(n+1).padStart(2,'0')}. ${e.code}  \`${e.code}\``);const chunks=[];let cur='';for(const line of lines){if((cur+'\n'+line).length>1800){chunks.push(cur);cur=line}else cur+=(cur?'\n':'')+line}if(cur)chunks.push(cur);await i.editReply(`**Emojis do servidor • ${items.length} encontrados**\nCopie o código entre crases e cole no site.\n\n${chunks[0]}`);for(const x of chunks.slice(1))await i.followUp({content:x,ephemeral:true})}catch(e){await i.editReply(`Não foi possível listar os emojis: ${e.message}`)}return}
+
   if(i.commandName==='painelregistro'){
     if(!(await guardAdminCommand(i)))return;
 
